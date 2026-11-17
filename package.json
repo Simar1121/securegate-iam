@@ -1,0 +1,26 @@
+{
+  "name": "securegate",
+  "version": "1.0.0",
+  "description": "SecureGate — Enterprise Identity & Access Management (IAM) Web Application",
+  "scripts": {
+    "server": "npm --prefix server start",
+    "server:dev": "npm --prefix server run dev",
+    "client": "npm --prefix client run dev",
+    "client:build": "npm --prefix client run build",
+    "test:security": "node server/testSecurityAudit.js",
+    "test": "npm run test:security"
+  },
+  "keywords": [
+    "iam",
+    "identity-access-management",
+    "mern",
+    "rbac",
+    "security",
+    "mongodb",
+    "jwt",
+    "express",
+    "react"
+  ],
+  "author": "SecureGate Team",
+  "license": "MIT"
+}
