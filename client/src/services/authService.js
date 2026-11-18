@@ -7,7 +7,21 @@ export const authService = {
   },
 
   verifyLoginOtp: async (challenge) => {
-    const res = await api.post('/auth/login/verify-otp', challenge);
+    let deviceId = localStorage.getItem('securegate_device_id');
+    if (!/^[a-f0-9]{64}$/i.test(deviceId || '')) {
+      const randomBytes = new Uint8Array(32);
+      window.crypto.getRandomValues(randomBytes);
+      deviceId = Array.from(randomBytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+      localStorage.setItem('securegate_device_id', deviceId);
+    }
+    const deviceName = navigator.platform || 'Browser device';
+    const payload = {
+      ...challenge,
+      deviceId,
+      deviceName,
+      platform: navigator.platform || 'Unknown',
+    };
+    const res = await api.post('/auth/login/verify-otp', payload);
     return res.data;
   },
 
