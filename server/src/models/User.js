@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
+import crypto from 'crypto';
 
 const userSchema = new mongoose.Schema(
   {
@@ -157,6 +158,7 @@ userSchema.methods.generateAuthToken = function (deviceIdHash) {
   return jwt.sign(
     {
       id: this._id,
+      jti: crypto.randomUUID(),
       email: this.email,
       role: this.role,
       tokenVersion: this.tokenVersion || 0,
