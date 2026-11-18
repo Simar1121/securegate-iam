@@ -43,6 +43,25 @@ export const protect = async (req, res, next) => {
       });
     }
 
+    // Require the current browser instance to present the same random device
+    // identifier used when this MFA session was issued.
+    const presentedDeviceId = req.get('X-SecureGate-Device');
+    if (typeof presentedDeviceId !== 'string' || !/^[a-f0-9]{64}$/i.test(presentedDeviceId)) {
+      return res.status(401).json({
+        success: false,
+        message: 'This request is missing the registered device binding. Sign in again from your registered browser.',
+      });
+    }
+    const presentedDeviceHash = crypto.createHmac('sha256', secret).update(presentedDeviceId).digest('hex');
+    const expectedDeviceHash = Buffer.from(decoded.deviceIdHash, 'hex');
+    const suppliedDeviceHash = Buffer.from(presentedDeviceHash, 'hex');
+    if (!crypto.timingSafeEqual(expectedDeviceHash, suppliedDeviceHash)) {
+      return res.status(401).json({
+        success: false,
+        message: 'This session is bound to a different device. Sign in again from your registered browser.',
+      });
+    }
+
     // 2. Store/check only a SHA-256 digest of revoked JWTs, never the bearer token itself.
     const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
     const isRevoked = await RevokedToken.findOne({
