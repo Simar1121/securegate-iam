@@ -841,7 +841,7 @@ export const verifyLoginOtp = async (req, res) => {
     if (!user.emailVerifiedAt) user.emailVerifiedAt = now;
     await user.save();
 
-    const token = user.generateAuthToken();
+    const token = user.generateAuthToken(deviceIdHash);
     await logAudit({
       req,
       action: 'LOGIN_SUCCESS',
