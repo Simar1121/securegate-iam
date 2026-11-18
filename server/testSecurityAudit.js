@@ -62,6 +62,7 @@ async function runSecurityTests() {
         ...options,
         headers: {
           'Content-Type': 'application/json',
+          'X-SecureGate-Device': 'a'.repeat(64),
           ...(options.headers || {}),
         },
       });
@@ -481,6 +482,19 @@ async function runSecurityTests() {
       method: 'POST',
       body: JSON.stringify({ email: 'admin@securegate.io', password: 'Admin@123' }),
     });
+    assert(
+      firstFactorOnly.status === 200 &&
+      firstFactorOnly.data?.requiresOtp === true &&
+      !firstFactorOnly.data?.token &&
+      typeof firstFactorOnly.data?.challengeId === 'string',
+      'First-factor password verification returns an OTP challenge and no access JWT',
+      JSON.stringify({ status: firstFactorOnly.status, response: firstFactorOnly.data })
+    );
+    if (firstFactorOnly.status !== 200 || !firstFactorOnly.data?.requiresOtp ||
+        typeof firstFactorOnly.data?.challengeId !== 'string') {
+      throw new Error('Could not create the OTP challenge for the resend test. Check the login response printed above.');
+    }
+
     const firstFactorMail = [...(globalThis.__securegateTestOutbox || [])]
       .reverse()
       .find((message) => message.purpose === 'LOGIN_OTP' && message.to === 'admin@securegate.io');
@@ -496,11 +510,17 @@ async function runSecurityTests() {
       }),
     });
     const adminOtpUser = await User.findOne({ email: 'admin@securegate.io' });
+    if (!adminOtpUser) throw new Error('Seeded Super Admin account was not found in securegate_test_db.');
     const activeAdminChallenge = await AuthChallenge.findOne({
       userId: adminOtpUser._id,
+      challengeIdHash: (await import('crypto')).createHash('sha256')
+        .update(firstFactorOnly.data.challengeId).digest('hex'),
       purpose: 'LOGIN_OTP',
       consumedAt: null,
-    }).sort({ createdAt: -1 });
+    });
+    if (!activeAdminChallenge) {
+      throw new Error('The OTP challenge returned by /auth/login was not persisted in securegate_test_db.');
+    }
     await AuthChallenge.updateOne(
       { _id: activeAdminChallenge._id },
       { $set: { lastSentAt: new Date(Date.now() - 60 * 1000) } }
@@ -520,14 +540,6 @@ async function runSecurityTests() {
       challengeAfterResend?.resends === 1,
       'OTP resend preserves the cumulative failed-attempt count and records the resend'
     );
-    assert(
-      firstFactorOnly.status === 200 &&
-      firstFactorOnly.data.requiresOtp === true &&
-      !firstFactorOnly.data.token &&
-      !!firstFactorOnly.data.challengeId,
-      'First-factor password verification returns an OTP challenge and no access JWT'
-    );
-
     const verifiedFactor = await api('/auth/login/verify-otp', {
       method: 'POST',
       body: JSON.stringify({
