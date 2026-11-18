@@ -162,3 +162,63 @@ securegate/
 │   ├── package.json
 │   ├── testBackend.js
 │   └── test
+
+---
+
+## Security hardening: email MFA, invitations and trusted devices
+
+The authentication flow is being implemented as a two-step process:
+
+1. The user submits their registered email address or employee ID and password.
+2. SecureGate emails a six-digit OTP to the registered mailbox.
+3. The OTP is valid for five minutes, single-use, limited to five attempts and protected by a resend cooldown.
+4. Only successful OTP verification can establish an authenticated session.
+
+OTP values are stored as keyed digests. The first-factor response contains an opaque challenge identifier, not an access token. Existing JWTs issued before mandatory MFA are rejected.
+
+### Employee onboarding
+
+Administrators create an employee record without setting the employee's password. SecureGate emails a one-time invitation link. The invited employee verifies the mailbox and creates their own password. Invitation links expire after 24 hours and can be resent by an authorized administrator.
+
+### Administrator governance
+
+- Exactly one Super Admin is created through initial organization setup.
+- The sole Super Admin cannot be created again, demoted, suspended, deactivated or deleted through the employee-management endpoints.
+- A maximum of three IT Administrators can be appointed.
+- Only the Super Admin can appoint, promote or delete IT Administrators.
+- Super Admin and IT Administrator are the only roles allowed to create employee accounts.
+- IT Administrators cannot create or promote other administrators.
+
+Administrator seat records are maintained separately from existing user records. Existing employee records are not reset or deleted by this feature.
+
+### Device trust and login risk assessment
+
+After successful email OTP verification, SecureGate registers the browser device and evaluates its context. The initial risk model considers new devices, changed IP addresses, changed user agents, previously revoked devices and incorrect OTP attempts. High-risk sign-ins are blocked.
+
+Access tokens contain a device binding. The backend checks the device's current trust state on protected requests, so revoking a device also invalidates sessions bound to it. Users can inspect and revoke their other trusted devices in Profile → Password & Security.
+
+### Gmail SMTP configuration
+
+Use a Gmail account dedicated to application mail. Enable Google 2-Step Verification and create a Google App Password. Do not use the account's regular Gmail password, and do not commit credentials.
+
+Configure the following in `server/.env` (the names and placeholders are also listed in `server/.env.example`):
+
+```env
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_SECURE=false
+SMTP_USER=your-securegate-sender@gmail.com
+SMTP_APP_PASSWORD=YOUR_GOOGLE_APP_PASSWORD
+EMAIL_FROM=SecureGate IAM <your-securegate-sender@gmail.com>
+FRONTEND_URL=http://localhost:5173
+```
+
+Use port 587 with STARTTLS (`SMTP_SECURE=false`) or port 465 with implicit TLS (`SMTP_SECURE=true`). `FRONTEND_URL` must be the URL the invited employee can actually reach. For LAN demonstrations, use the host computer's reachable LAN address; for deployment, use the deployed frontend origin.
+
+The backend uses Nodemailer 10.6.0 and requires Node.js 20 or later. After pulling the branch, run `npm install` in the `server` directory to install dependencies.
+
+### Security test coverage
+
+The security audit suite now exercises password-plus-OTP login, OTP replay rejection, invitation acceptance, trusted device registration and revocation, legacy-token rejection, administrator seat limits and protection of the sole Super Admin.
+
+Run it only against a separate disposable MongoDB database whose name contains `test`, for example `securegate_test_db`. Never point the destructive security test suite at `securegate_org_db`.
