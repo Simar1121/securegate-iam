@@ -792,13 +792,18 @@ async function runSecurityTests() {
       headers: { Authorization: `Bearer ${superToken}` },
     });
     assert(
-      rootDemotion.status === 403 && rootDeletion.status === 403,
+      rootDemotion.status === 403 &&
+      String(rootDemotion.data?.message || '').toLowerCase().includes('sole super admin') &&
+      rootDeletion.status === 403 &&
+      String(rootDeletion.data?.message || '').toLowerCase().includes('sole super admin') &&
+      await User.exists({ _id: rootUserForLegacyCheck._id }),
       'The sole Super Admin account cannot be demoted or deleted',
       JSON.stringify({
         demotionStatus: rootDemotion.status,
         demotionResponse: rootDemotion.data,
         deletionStatus: rootDeletion.status,
         deletionResponse: rootDeletion.data,
+        rootAccountStillExists: Boolean(await User.exists({ _id: rootUserForLegacyCheck._id })),
       })
     );
 
