@@ -3,6 +3,7 @@ import crypto from 'crypto';
 import User from '../models/User.js';
 import RevokedToken from '../models/RevokedToken.js';
 import Device from '../models/Device.js';
+import { hasAdminSeat } from '../services/adminSeatService.js';
 
 // Protect routes: verify JWT, ensure token is not revoked, verify session version and active user status
 export const protect = async (req, res, next) => {
@@ -129,6 +130,14 @@ export const protect = async (req, res, next) => {
       return res.status(403).json({
         success: false,
         message: 'Access denied: Your assigned role is missing or inactive. Contact an administrator.',
+      });
+    }
+
+    if (['Super Admin', 'IT Administrator'].includes(user.role.name) &&
+        !await hasAdminSeat(user.role.name, user._id)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied: This administrator account does not hold an organization administrator seat.',
       });
     }
 
