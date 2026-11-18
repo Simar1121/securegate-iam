@@ -11,11 +11,16 @@ const SEAT_DEFINITIONS = [
 
 export const ensureAdminSeatInventory = async () => {
   for (const seat of SEAT_DEFINITIONS) {
-    await AdminSeat.updateOne(
-      { seatKey: seat.seatKey },
-      { $setOnInsert: { ...seat, userId: null, assignedAt: null } },
-      { upsert: true }
-    );
+    try {
+      await AdminSeat.updateOne(
+        { seatKey: seat.seatKey },
+        { $setOnInsert: { ...seat, userId: null, assignedAt: null } },
+        { upsert: true }
+      );
+    } catch (error) {
+      // Concurrent first-use requests may race to create the same unique slot.
+      if (error.code !== 11000) throw error;
+    }
   }
 };
 
@@ -44,11 +49,16 @@ export const synchronizeAdminSeats = async () => {
     for (const user of users) {
       const alreadyAssigned = await AdminSeat.exists({ roleName, userId: user._id });
       if (alreadyAssigned) continue;
-      await AdminSeat.findOneAndUpdate(
-        { roleName, userId: null },
-        { $set: { userId: user._id, assignedAt: new Date() } },
-        { new: true, sort: { seatNumber: 1 } }
-      );
+      try {
+        await AdminSeat.findOneAndUpdate(
+          { roleName, userId: null },
+          { $set: { userId: user._id, assignedAt: new Date() } },
+          { new: true, sort: { seatNumber: 1 } }
+        );
+      } catch (error) {
+        // Another reconciler may have mapped this same identity concurrently.
+        if (error.code !== 11000) throw error;
+      }
     }
   }
 };
@@ -60,11 +70,17 @@ export const reserveAdminSeat = async (roleName, userId) => {
   const existing = await AdminSeat.findOne({ roleName, userId });
   if (existing) return existing;
 
-  const seat = await AdminSeat.findOneAndUpdate(
-    { roleName, userId: null },
-    { $set: { userId, assignedAt: new Date() } },
-    { new: true, sort: { seatNumber: 1 } }
-  );
+  let seat;
+  try {
+    seat = await AdminSeat.findOneAndUpdate(
+      { roleName, userId: null },
+      { $set: { userId, assignedAt: new Date() } },
+      { new: true, sort: { seatNumber: 1 } }
+    );
+  } catch (error) {
+    if (error.code !== 11000) throw error;
+    seat = await AdminSeat.findOne({ roleName, userId });
+  }
 
   if (!seat) {
     const limit = roleName === 'Super Admin' ? 1 : 3;
