@@ -23,6 +23,7 @@ if (!/(^|[_-])test([_-]|$)/i.test(testDatabaseName)) {
 
 process.env.NODE_ENV = 'test';
 process.env.MONGODB_URI = testMongoUri;
+process.env.CLIENT_URL = process.env.CLIENT_URL || 'http://localhost:5173';
 process.env.ALLOW_DESTRUCTIVE_SEED = 'true';
 
 const mongoose = (await import('mongoose')).default;
