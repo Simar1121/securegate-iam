@@ -50,6 +50,7 @@ app.use(
 // 2. Strict CORS Configuration
 const allowedOrigins = [
   process.env.CLIENT_URL,
+  process.env.FRONTEND_URL,
   'http://localhost:5173',
   'http://127.0.0.1:5173',
 ].filter(Boolean);
@@ -96,8 +97,6 @@ const authLimiter = rateLimit({
 
 app.use('/api', generalApiLimiter);
 app.use('/api/auth/login', authLimiter);
-app.use('/api/auth/login/verify-otp', authLimiter);
-app.use('/api/auth/login/resend-otp', authLimiter);
 app.use('/api/auth/invitations/accept', authLimiter);
 app.use('/api/auth/register', authLimiter);
 
