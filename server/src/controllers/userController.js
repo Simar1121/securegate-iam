@@ -387,6 +387,12 @@ export const updateUser = async (req, res) => {
       });
     }
 
+    // A privileged account's mailbox is its MFA factor; changing it requires a
+    // dedicated verified mailbox-change flow rather than an ordinary user edit.
+    if (PRIVILEGED_ROLES.includes(targetCurrentRole) && email && email.toLowerCase().trim() !== user.email) {
+      return res.status(403).json({ success: false, message: 'Privileged administrator email changes require a verified security workflow.' });
+    }
+
     // Check duplicate email if changed
     if (email && email.toLowerCase().trim() !== user.email) {
       const emailNormalized = email.toLowerCase().trim();
@@ -482,6 +488,37 @@ export const updateUser = async (req, res) => {
         });
       }
 
+      // SecureGate has exactly one Super Admin, created only during first-time setup.
+      if (newRole.name === 'Super Admin' && targetCurrentRole !== 'Super Admin') {
+        return res.status(403).json({
+          success: false,
+          message: 'The organization has exactly one Super Admin. A second Super Admin cannot be appointed.',
+        });
+      }
+
+      // The sole Super Admin is a protected root identity and cannot be demoted.
+      if (targetCurrentRole === 'Super Admin' && newRole.name !== 'Super Admin') {
+        return res.status(403).json({
+          success: false,
+          message: 'The sole Super Admin account cannot be demoted.',
+        });
+      }
+
+      if (newRole.name === 'IT Administrator' && callerRole !== 'Super Admin') {
+        return res.status(403).json({
+          success: false,
+          message: 'Only the Super Admin can appoint or promote an IT Administrator.',
+        });
+      }
+
+      if (newRole.name === 'IT Administrator' && targetCurrentRole !== 'IT Administrator') {
+        try {
+          await reserveAdminSeat('IT Administrator', user._id);
+        } catch (seatError) {
+          return res.status(409).json({ success: false, message: seatError.message });
+        }
+      }
+
       // Only Super Admin can promote someone to Super Admin
       if (newRole.name === 'Super Admin' && callerRole !== 'Super Admin') {
         await logAudit({
@@ -528,20 +565,6 @@ export const updateUser = async (req, res) => {
         });
       }
 
-      // Prevent demoting the last active Super Admin
-      if (targetCurrentRole === 'Super Admin' && newRole.name !== 'Super Admin') {
-        const activeSuperAdminCount = await User.countDocuments({
-          role: user.role._id,
-          status: 'Active',
-        });
-        if (activeSuperAdminCount <= 1) {
-          return res.status(400).json({
-            success: false,
-            message: 'Safety safeguard: Cannot demote the last remaining active Super Administrator account.',
-          });
-        }
-      }
-
       changes.role = { from: user.role?.name, to: newRole.name };
       user.role = newRole._id;
       // Invalidate existing sessions on role change so new permissions take effect immediately
@@ -557,18 +580,12 @@ export const updateUser = async (req, res) => {
         });
       }
 
-      // Prevent locking out the last active Super Admin
+      // The sole Super Admin must remain active to avoid permanent organization lockout.
       if (targetCurrentRole === 'Super Admin' && status !== 'Active') {
-        const activeSuperAdminCount = await User.countDocuments({
-          role: user.role._id,
-          status: 'Active',
+        return res.status(403).json({
+          success: false,
+          message: 'The sole Super Admin account cannot be suspended or deactivated.',
         });
-        if (activeSuperAdminCount <= 1) {
-          return res.status(400).json({
-            success: false,
-            message: 'Safety safeguard: Cannot suspend or deactivate the last remaining active Super Administrator.',
-          });
-        }
       }
 
       changes.status = { from: user.status, to: status };
@@ -594,6 +611,9 @@ export const updateUser = async (req, res) => {
     }
 
     await user.save();
+    if (targetCurrentRole === 'IT Administrator' && changes.role && changes.role.to !== 'IT Administrator') {
+      await releaseAdminSeat(user._id);
+    }
     await user.populate({
       path: 'role',
       select: 'name description isDefault isCustom status',
@@ -660,46 +680,27 @@ export const deleteUser = async (req, res) => {
     const callerRole = req.user.role?.name;
     const targetRole = user.role?.name;
 
-    // PRIVILEGE SAFEGUARD: Protect Super Admin accounts from deletion by non-Super Admins
+    // The organization must retain exactly one Super Admin. The root account
+    // cannot be deleted, even by itself or by another privileged account.
     if (targetRole === 'Super Admin') {
-      if (callerRole !== 'Super Admin') {
-        await logAudit({
-          req,
-          action: 'UNAUTHORIZED_ADMIN_DELETION_BLOCKED',
-          category: 'SECURITY',
-          actor: req.user._id,
-          actorEmail: req.user.email,
-          actorName: req.user.fullName,
-          actorRole: callerRole,
-          targetType: 'User',
-          targetId: user._id,
-          targetName: user.fullName,
-          status: 'WARNING',
-          details: { reason: 'Non-Super Admin attempted to delete a Super Admin' },
-        });
-
-        return res.status(403).json({
-          success: false,
-          message: 'Forbidden: Super Administrator accounts can only be deleted by another Super Administrator.',
-        });
-      }
-
-      // Check if this is the last Super Admin
-      const activeSuperAdminCount = await User.countDocuments({
-        role: user.role._id,
+      return res.status(403).json({
+        success: false,
+        message: 'The sole Super Admin account is protected from deletion.',
       });
-      if (activeSuperAdminCount <= 1) {
-        return res.status(400).json({
-          success: false,
-          message: 'Safety safeguard: Cannot delete the last remaining Super Administrator account.',
-        });
-      }
+    }
+
+    if (targetRole === 'IT Administrator' && callerRole !== 'Super Admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Only the Super Admin can delete an IT Administrator account.',
+      });
     }
 
     const userName = user.fullName;
     const userEmail = user.email;
 
     await User.findByIdAndDelete(req.params.id);
+    if (targetRole === 'IT Administrator') await releaseAdminSeat(user._id);
 
     // Audit log
     await logAudit({
@@ -776,19 +777,11 @@ export const updateUserStatus = async (req, res) => {
       });
     }
 
-    if (targetRole === 'Super Admin') {
-      if (status !== 'Active') {
-        const activeCount = await User.countDocuments({
-          role: user.role._id,
-          status: 'Active',
-        });
-        if (activeCount <= 1) {
-          return res.status(400).json({
-            success: false,
-            message: 'Safety safeguard: Cannot suspend or deactivate the last remaining active Super Administrator.',
-          });
-        }
-      }
+    if (targetRole === 'Super Admin' && status !== 'Active') {
+      return res.status(403).json({
+        success: false,
+        message: 'The sole Super Admin account cannot be suspended or deactivated.',
+      });
     }
 
     const previousStatus = user.status;
