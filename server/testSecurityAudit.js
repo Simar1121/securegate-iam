@@ -270,7 +270,9 @@ async function runSecurityTests() {
       }),
     });
     assert(
-      hrCreateAdmin.status === 403 && hrCreateAdmin.data.message.includes('Privilege Escalation Blocked'),
+      hrCreateAdmin.status === 403 &&
+      typeof hrCreateAdmin.data.message === 'string' &&
+      !(await User.exists({ email: 'malicious.admin@securegate.io' })),
       'HR Manager cannot create a new Super Admin account (Blocked with 403 Forbidden)'
     );
 
@@ -286,7 +288,9 @@ async function runSecurityTests() {
       }),
     });
     assert(
-      hrCreateIT.status === 403 && hrCreateIT.data.message.includes('Privilege Escalation Blocked'),
+      hrCreateIT.status === 403 &&
+      typeof hrCreateIT.data.message === 'string' &&
+      !(await User.exists({ email: 'malicious.it@securegate.io' })),
       'HR Manager cannot create an IT Administrator account (Blocked with 403 Forbidden)'
     );
 
