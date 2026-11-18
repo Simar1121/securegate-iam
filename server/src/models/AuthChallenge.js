@@ -6,6 +6,7 @@ const authChallengeSchema = new mongoose.Schema({
   codeHash: { type: String, required: true },
   purpose: { type: String, enum: ['LOGIN_OTP'], default: 'LOGIN_OTP', required: true },
   attempts: { type: Number, default: 0, min: 0 },
+  resends: { type: Number, default: 0, min: 0 },
   lastSentAt: { type: Date, required: true },
   expiresAt: { type: Date, required: true },
   consumedAt: { type: Date, default: null },
