@@ -209,105 +209,110 @@ export const createUser = async (req, res) => {
       });
     }
     if (roleDoc.name === 'IT Administrator' && callerRole !== 'Super Admin') {
+      try {
       await logAudit({
-        req, action: 'PRIVILEGE_ESCALATION_BLOCKED', category: 'SECURITY',
-        actor: req.user._id, actorEmail: req.user.email, actorName: req.user.fullName,
-        actorRole: callerRole, targetType: 'User', targetName: emailNormalized,
-        status: 'WARNING', details: { attemptedRole: roleDoc.name, reason: 'Only the Super Admin may appoint IT Administrators.' },
-      });
-      return res.status(403).json({ success: false, message: 'Only the Super Admin can appoint IT Administrators.' });
-    }
+          req, action: 'PRIVILEGE_ESCALATION_BLOCKED', category: 'SECURITY',
+          actor: req.user._id, actorEmail: req.user.email, actorName: req.user.fullName,
+          actorRole: callerRole, targetType: 'User', targetName: emailNormalized,
+          status: 'WARNING', details: { attemptedRole: roleDoc.name, reason: 'Only the Super Admin may appoint IT Administrators.' },
+        });
+        return res.status(403).json({ success: false, message: 'Only the Super Admin can appoint IT Administrators.' });
+      }
 
-    if (!mayAssignRole(req.user, roleDoc)) {
+      if (!mayAssignRole(req.user, roleDoc)) {
+        await logAudit({
+          req, action: 'PRIVILEGE_ESCALATION_BLOCKED', category: 'SECURITY',
+          actor: req.user._id, actorEmail: req.user.email, actorName: req.user.fullName,
+          actorRole: callerRole, targetType: 'User', targetName: emailNormalized,
+          status: 'WARNING',
+          details: { attemptedRole: roleDoc.name, reason: 'Requested role contains privileges the actor is not authorized to assign' },
+        });
+        return res.status(403).json({
+          success: false,
+          message: 'You may assign only roles whose permissions are within your own authority. Privileged roles require the Super Admin.',
+        });
+      }
+
+      const frontendUrl = process.env.FRONTEND_URL || process.env.CLIENT_URL;
+      if (!frontendUrl || !/^https?:\/\//i.test(frontendUrl)) {
+        return res.status(503).json({ success: false, message: 'Invitation email delivery is not configured. Set FRONTEND_URL or CLIENT_URL.' });
+      }
+
+      const invitationToken = crypto.randomBytes(32).toString('hex');
+      createdUser = new User({
+        firstName: String(firstName).trim().slice(0, 50),
+        lastName: String(lastName).trim().slice(0, 50),
+        email: emailNormalized,
+        invitationPending: true,
+        emailVerifiedAt: null,
+        role: roleDoc._id,
+        department: department?.trim().slice(0, 50) || 'Engineering',
+        jobTitle: jobTitle?.trim().slice(0, 50) || 'Team Member',
+        phone: phone?.trim().slice(0, 30) || '',
+        location: location?.trim().slice(0, 50) || 'Headquarters',
+        status: ['Active', 'Suspended', 'Deactivated'].includes(status) ? status : 'Active',
+        mustChangePassword: false,
+        tokenVersion: 0,
+      });
+
+      if (roleDoc.name === 'IT Administrator') {
+        await reserveAdminSeat('IT Administrator', createdUser._id);
+        reservedAdminSeat = true;
+      }
+
+      await createdUser.save();
+      await createdUser.populate('role');
+
+      const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+      invitation = await Invitation.create({
+        userId: createdUser._id,
+        invitedBy: req.user._id,
+        tokenHash: sha256(invitationToken),
+        expiresAt,
+      });
+
+      const invitationUrl = `${frontendUrl.replace(/\/$/, '')}/accept-invitation?token=${encodeURIComponent(invitationToken)}`;
+      try {
+        await sendEmployeeInvitationEmail({
+          to: createdUser.email,
+          firstName: createdUser.firstName,
+          invitationUrl,
+          expiresInHours: 24,
+        });
+      } catch (mailError) {
+        await Invitation.deleteOne({ _id: invitation._id });
+        await User.deleteOne({ _id: createdUser._id });
+        if (reservedAdminSeat) await releaseAdminSeat(createdUser._id);
+        return res.status(503).json({
+          success: false,
+          message: 'The employee record was not retained because Gmail could not deliver the invitation. Check SMTP configuration and try again.',
+        });
+      }
+
       await logAudit({
-        req, action: 'PRIVILEGE_ESCALATION_BLOCKED', category: 'SECURITY',
-        actor: req.user._id, actorEmail: req.user.email, actorName: req.user.fullName,
-        actorRole: callerRole, targetType: 'User', targetName: emailNormalized,
-        status: 'WARNING',
-        details: { attemptedRole: roleDoc.name, reason: 'Requested role contains privileges the actor is not authorized to assign' },
+        req,
+        action: 'USER_INVITED',
+        category: 'USER_MGMT',
+        actor: req.user._id,
+        actorEmail: req.user.email,
+        actorName: req.user.fullName,
+        actorRole: callerRole,
+        targetType: 'User',
+        targetId: createdUser._id,
+        targetName: createdUser.fullName,
+        status: 'SUCCESS',
+        details: {
+          email: createdUser.email,
+          role: roleDoc.name,
+          department: createdUser.department,
+          employeeId: createdUser.employeeId,
+          invitationExpiresAt: expiresAt,
+        },
       });
-      return res.status(403).json({
-        success: false,
-        message: 'You may assign only roles whose permissions are within your own authority. Privileged roles require the Super Admin.',
-      });
+
+    } catch (auditError) {
+      console.error('[CreateUser Audit Warning]: Invitation was sent but the audit event could not be saved:', auditError.message);
     }
-
-    const frontendUrl = process.env.FRONTEND_URL || process.env.CLIENT_URL;
-    if (!frontendUrl || !/^https?:\/\//i.test(frontendUrl)) {
-      return res.status(503).json({ success: false, message: 'Invitation email delivery is not configured. Set FRONTEND_URL or CLIENT_URL.' });
-    }
-
-    const invitationToken = crypto.randomBytes(32).toString('hex');
-    createdUser = new User({
-      firstName: String(firstName).trim().slice(0, 50),
-      lastName: String(lastName).trim().slice(0, 50),
-      email: emailNormalized,
-      invitationPending: true,
-      emailVerifiedAt: null,
-      role: roleDoc._id,
-      department: department?.trim().slice(0, 50) || 'Engineering',
-      jobTitle: jobTitle?.trim().slice(0, 50) || 'Team Member',
-      phone: phone?.trim().slice(0, 30) || '',
-      location: location?.trim().slice(0, 50) || 'Headquarters',
-      status: ['Active', 'Suspended', 'Deactivated'].includes(status) ? status : 'Active',
-      mustChangePassword: false,
-      tokenVersion: 0,
-    });
-
-    if (roleDoc.name === 'IT Administrator') {
-      await reserveAdminSeat('IT Administrator', createdUser._id);
-      reservedAdminSeat = true;
-    }
-
-    await createdUser.save();
-    await createdUser.populate('role');
-
-    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
-    invitation = await Invitation.create({
-      userId: createdUser._id,
-      invitedBy: req.user._id,
-      tokenHash: sha256(invitationToken),
-      expiresAt,
-    });
-
-    const invitationUrl = `${frontendUrl.replace(/\/$/, '')}/accept-invitation?token=${encodeURIComponent(invitationToken)}`;
-    try {
-      await sendEmployeeInvitationEmail({
-        to: createdUser.email,
-        firstName: createdUser.firstName,
-        invitationUrl,
-        expiresInHours: 24,
-      });
-    } catch (mailError) {
-      await Invitation.deleteOne({ _id: invitation._id });
-      await User.deleteOne({ _id: createdUser._id });
-      if (reservedAdminSeat) await releaseAdminSeat(createdUser._id);
-      return res.status(503).json({
-        success: false,
-        message: 'The employee record was not retained because Gmail could not deliver the invitation. Check SMTP configuration and try again.',
-      });
-    }
-
-    await logAudit({
-      req,
-      action: 'USER_INVITED',
-      category: 'USER_MGMT',
-      actor: req.user._id,
-      actorEmail: req.user.email,
-      actorName: req.user.fullName,
-      actorRole: callerRole,
-      targetType: 'User',
-      targetId: createdUser._id,
-      targetName: createdUser.fullName,
-      status: 'SUCCESS',
-      details: {
-        email: createdUser.email,
-        role: roleDoc.name,
-        department: createdUser.department,
-        employeeId: createdUser.employeeId,
-        invitationExpiresAt: expiresAt,
-      },
-    });
 
     return res.status(201).json({
       success: true,
@@ -356,11 +361,6 @@ export const resendInvitation = async (req, res) => {
     const invitationToken = crypto.randomBytes(32).toString('hex');
     const expiresAt = new Date(now.getTime() + 24 * 60 * 60 * 1000);
 
-    await Invitation.updateMany(
-      { userId: user._id, acceptedAt: null, revokedAt: null },
-      { $set: { revokedAt: now } }
-    );
-
     invitation = await Invitation.create({
       userId: user._id,
       invitedBy: req.user._id,
@@ -380,6 +380,13 @@ export const resendInvitation = async (req, res) => {
       await Invitation.updateOne({ _id: invitation._id }, { $set: { revokedAt: new Date() } });
       return res.status(503).json({ success: false, message: 'Unable to deliver the invitation email. Check Gmail SMTP configuration and retry.' });
     }
+
+    // Revoke older invitation links only after the replacement email has
+    // actually been accepted by Gmail, so mail outages do not strand users.
+    await Invitation.updateMany(
+      { userId: user._id, _id: { $ne: invitation._id }, acceptedAt: null, revokedAt: null },
+      { $set: { revokedAt: new Date() } }
+    );
 
     await logAudit({
       req,
