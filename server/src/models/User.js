@@ -144,10 +144,14 @@ userSchema.methods.matchPassword = async function (enteredPassword) {
 };
 
 // Method: Generate JWT token
-userSchema.methods.generateAuthToken = function () {
+userSchema.methods.generateAuthToken = function (deviceIdHash) {
   const secret = process.env.JWT_SECRET;
   if (!secret || secret.trim().length < 32) {
     throw new Error('FATAL SECURITY ERROR: JWT_SECRET environment variable is missing or insecure (must be at least 32 characters).');
+  }
+
+  if (typeof deviceIdHash !== 'string' || !/^[a-f0-9]{64}$/i.test(deviceIdHash)) {
+    throw new Error('A trusted device binding is required before issuing an access token.');
   }
 
   return jwt.sign(
@@ -156,6 +160,8 @@ userSchema.methods.generateAuthToken = function () {
       email: this.email,
       role: this.role,
       tokenVersion: this.tokenVersion || 0,
+      mfaVerified: true,
+      deviceIdHash,
     },
     secret,
     {
