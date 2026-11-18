@@ -417,6 +417,7 @@ export const Profile = () => {
 
       {/* Tab 3: Password & Security */}
       {activeTab === 'security' && (
+        <>
         <div className="max-w-3xl p-6 rounded-2xl bg-charcoal-900 border border-charcoal-800 shadow-xl space-y-4">
           <div>
             <h2 className="text-base font-bold text-white flex items-center gap-2">
@@ -531,6 +532,7 @@ export const Profile = () => {
             </div>
           )}
         </div>
+        </>
       )}
     </div>
   );
