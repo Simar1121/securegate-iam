@@ -4,6 +4,7 @@ import Permission from '../models/Permission.js';
 import AuditLog from '../models/AuditLog.js';
 import SetupState from '../models/SetupState.js';
 import { validatePasswordStrength } from '../utils/security.js';
+import { synchronizeAdminSeats, releaseAdminSeat } from '../services/adminSeatService.js';
 
 const permissions = [
   { name: 'View Users', code: 'users:read', category: 'User Management', description: 'Can view employee directory, profiles, and basic statistics', isSystem: true },
@@ -103,6 +104,7 @@ export const initializeOrganization = async (req, res) => {
       tokenVersion: 0,
     });
     createdUserId = admin._id;
+    await synchronizeAdminSeats();
 
     const audit = await AuditLog.create({
       action: 'SYSTEM_INITIALIZED', category: 'SYSTEM', actor: admin._id,
@@ -118,7 +120,10 @@ export const initializeOrganization = async (req, res) => {
   } catch (error) {
     // Roll back only documents created by this request; never clear collections.
     if (createdAuditId) await AuditLog.deleteOne({ _id: createdAuditId }).catch(() => {});
-    if (createdUserId) await User.deleteOne({ _id: createdUserId }).catch(() => {});
+    if (createdUserId) {
+      await releaseAdminSeat(createdUserId).catch(() => {});
+      await User.deleteOne({ _id: createdUserId }).catch(() => {});
+    }
     if (createdRoleIds.length) await Role.deleteMany({ _id: { $in: createdRoleIds } }).catch(() => {});
     if (createdPermissionIds.length) await Permission.deleteMany({ _id: { $in: createdPermissionIds } }).catch(() => {});
     if (lockAcquired) await SetupState.deleteOne({ _id: 'organization' }).catch(() => {});
