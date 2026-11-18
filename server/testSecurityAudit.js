@@ -592,6 +592,21 @@ async function runSecurityTests() {
       'IT Administrator creates a password-pending employee and no temporary password is returned'
     );
 
+    const hrCannotInviteEmployee = await api('/users', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${hrToken}` },
+      body: JSON.stringify({
+        firstName: 'HR',
+        lastName: 'Unauthorized Invite',
+        email: 'hr.unauthorized.invite@securegate.io',
+        roleId: empRole._id.toString(),
+      }),
+    });
+    assert(
+      hrCannotInviteEmployee.status === 403,
+      'HR Manager cannot create even a standard employee account'
+    );
+
     const invitationMail = [...(globalThis.__securegateTestOutbox || [])]
       .reverse()
       .find((message) => message.purpose === 'INVITATION' && message.to === invitedEmployeeEmail);
