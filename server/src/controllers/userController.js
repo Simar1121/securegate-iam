@@ -783,23 +783,24 @@ export const deleteUser = async (req, res) => {
       });
     }
 
-    // Prevent deleting own account
-    if (user._id.toString() === req.user._id.toString()) {
-      return res.status(400).json({
-        success: false,
-        message: 'Security safeguard: You cannot delete your own account.',
-      });
-    }
-
     const callerRole = req.user.role?.name;
     const targetRole = user.role?.name;
 
-    // The organization must retain exactly one Super Admin. The root account
-    // cannot be deleted, even by itself or by another privileged account.
+    // The organization must retain exactly one Super Admin. Check this before
+    // the generic self-deletion guard so the immutable root-account policy is
+    // always the explicit reason returned to the caller.
     if (targetRole === 'Super Admin') {
       return res.status(403).json({
         success: false,
         message: 'The sole Super Admin account is protected from deletion.',
+      });
+    }
+
+    // Prevent deleting any other user's own account.
+    if (user._id.toString() === req.user._id.toString()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Security safeguard: You cannot delete your own account.',
       });
     }
 
