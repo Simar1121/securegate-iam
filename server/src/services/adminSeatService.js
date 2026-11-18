@@ -89,6 +89,11 @@ export const reserveAdminSeat = async (roleName, userId) => {
   return seat;
 };
 
+export const hasAdminSeat = async (roleName, userId) => {
+  if (!['Super Admin', 'IT Administrator'].includes(roleName)) return true;
+  return Boolean(await AdminSeat.exists({ roleName, userId }));
+};
+
 export const releaseAdminSeat = async (userId) => {
   await AdminSeat.updateOne(
     { userId },
