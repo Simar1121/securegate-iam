@@ -471,6 +471,220 @@ async function runSecurityTests() {
     const escalationLog = await AuditLog.findOne({ action: 'PRIVILEGE_ESCALATION_BLOCKED' });
     assert(!!escalationLog, 'PRIVILEGE_ESCALATION_BLOCKED security event successfully logged in audit trail');
 
+    // TEST 13: Mandatory email MFA, invitation onboarding, device trust and admin governance
+    console.log('\n--- 13. MFA, Invitations, Trusted Devices and Admin Governance ---');
+
+    // Password verification alone must never return a bearer token.
+    const firstFactorOnly = await api('/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ email: 'admin@securegate.io', password: 'Admin@123' }),
+    });
+    const firstFactorMail = [...(globalThis.__securegateTestOutbox || [])]
+      .reverse()
+      .find((message) => message.purpose === 'LOGIN_OTP' && message.to === 'admin@securegate.io');
+    assert(
+      firstFactorOnly.status === 200 &&
+      firstFactorOnly.data.requiresOtp === true &&
+      !firstFactorOnly.data.token &&
+      !!firstFactorOnly.data.challengeId,
+      'First-factor password verification returns an OTP challenge and no access JWT'
+    );
+
+    const verifiedFactor = await api('/auth/login/verify-otp', {
+      method: 'POST',
+      body: JSON.stringify({
+        challengeId: firstFactorOnly.data.challengeId,
+        code: firstFactorMail?.code,
+        deviceId: 'b'.repeat(64),
+        deviceName: 'MFA test device',
+        platform: 'Node.js test runner',
+      }),
+    });
+    assert(
+      verifiedFactor.status === 200 && !!verifiedFactor.data.token &&
+      verifiedFactor.data.user.role.name === 'Super Admin',
+      'A correct email OTP completes MFA and issues the authenticated session'
+    );
+
+    const replayedOtp = await api('/auth/login/verify-otp', {
+      method: 'POST',
+      body: JSON.stringify({
+        challengeId: firstFactorOnly.data.challengeId,
+        code: firstFactorMail?.code,
+        deviceId: 'b'.repeat(64),
+        deviceName: 'MFA test device',
+        platform: 'Node.js test runner',
+      }),
+    });
+    assert(replayedOtp.status !== 200 && !replayedOtp.data.token, 'A previously consumed OTP cannot be replayed');
+
+    // Legacy tokens issued before MFA/device binding must stop authorizing requests.
+    const rootUserForLegacyCheck = await User.findOne({ email: 'admin@securegate.io' });
+    const legacyToken = jwt.sign({
+      id: rootUserForLegacyCheck._id,
+      email: rootUserForLegacyCheck.email,
+      tokenVersion: rootUserForLegacyCheck.tokenVersion,
+    }, process.env.JWT_SECRET, { expiresIn: '1h' });
+    const legacySession = await api('/auth/me', {
+      headers: { Authorization: `Bearer ${legacyToken}` },
+    });
+    assert(
+      legacySession.status === 401 && legacySession.data.message.toLowerCase().includes('mfa'),
+      'Pre-MFA sessions are rejected and users must complete the new authentication flow'
+    );
+
+    // IT Administrator may invite a standard employee but cannot appoint another administrator.
+    const invitedEmployeeEmail = 'mfa.invited@securegate.io';
+    const employeeInvitation = await api('/users', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${itToken}` },
+      body: JSON.stringify({
+        firstName: 'MFA',
+        lastName: 'Invite',
+        email: invitedEmployeeEmail,
+        roleId: empRole._id.toString(),
+        department: 'Engineering',
+        jobTitle: 'New Team Member',
+      }),
+    });
+    assert(
+      employeeInvitation.status === 201 &&
+      employeeInvitation.data.data.invitationPending === true &&
+      !employeeInvitation.data.temporaryPassword,
+      'IT Administrator creates a password-pending employee and no temporary password is returned'
+    );
+
+    const invitationMail = [...(globalThis.__securegateTestOutbox || [])]
+      .reverse()
+      .find((message) => message.purpose === 'INVITATION' && message.to === invitedEmployeeEmail);
+    const invitationToken = invitationMail?.invitationUrl
+      ? new URL(invitationMail.invitationUrl).searchParams.get('token')
+      : null;
+
+    const acceptedInvitation = await api('/auth/invitations/accept', {
+      method: 'POST',
+      body: JSON.stringify({
+        token: invitationToken,
+        password: 'NewHire@2026',
+        confirmPassword: 'NewHire@2026',
+      }),
+    });
+    assert(acceptedInvitation.status === 200, 'Employee invitation verifies the mailbox and sets the employee password');
+
+    const replayedInvitation = await api('/auth/invitations/accept', {
+      method: 'POST',
+      body: JSON.stringify({
+        token: invitationToken,
+        password: 'NewHire@2026',
+        confirmPassword: 'NewHire@2026',
+      }),
+    });
+    assert(replayedInvitation.status === 400, 'An accepted employee invitation cannot be reused');
+
+    const invitedEmployeeLogin = await loginWithOtp({
+      method: 'POST',
+      body: JSON.stringify({ email: invitedEmployeeEmail, password: 'NewHire@2026' }),
+    });
+    assert(
+      invitedEmployeeLogin.status === 200 &&
+      invitedEmployeeLogin.data.user.role.name === 'Employee',
+      'An invited employee can sign in only after password setup and email OTP'
+    );
+
+    const invitedEmployeeDevices = await api('/devices', {
+      headers: { Authorization: `Bearer ${invitedEmployeeLogin.data.token}` },
+    });
+    const currentInvitedDevice = invitedEmployeeDevices.data?.data?.find((device) => device.isCurrentDevice);
+    assert(
+      invitedEmployeeDevices.status === 200 && !!currentInvitedDevice && currentInvitedDevice.status === 'Trusted',
+      'Successful MFA registers the browser as a trusted device'
+    );
+
+    const revokedDevice = await api(`/devices/${currentInvitedDevice?._id}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${invitedEmployeeLogin.data.token}` },
+    });
+    const revokedDeviceSession = await api('/auth/me', {
+      headers: { Authorization: `Bearer ${invitedEmployeeLogin.data.token}` },
+    });
+    assert(
+      revokedDevice.status === 200 && revokedDeviceSession.status === 401,
+      'Revoking a device immediately invalidates sessions bound to that device'
+    );
+
+    const itCannotAppointAdmin = await api('/users', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${itToken}` },
+      body: JSON.stringify({
+        firstName: 'Attempt',
+        lastName: 'Admin',
+        email: 'it.attempted.admin@securegate.io',
+        roleId: itAdminRole._id.toString(),
+      }),
+    });
+    assert(itCannotAppointAdmin.status === 403, 'IT Administrator cannot create or appoint another IT Administrator');
+
+    const saCannotCreateSecondRoot = await api('/users', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${superToken}` },
+      body: JSON.stringify({
+        firstName: 'Second',
+        lastName: 'Root',
+        email: 'second.superadmin@securegate.io',
+        roleId: superAdminRole._id.toString(),
+      }),
+    });
+    assert(saCannotCreateSecondRoot.status === 403, 'A second Super Admin cannot be created');
+
+    const itAdminTwo = await api('/users', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${superToken}` },
+      body: JSON.stringify({
+        firstName: 'IT',
+        lastName: 'Administrator Two',
+        email: 'it.admin.two@securegate.io',
+        roleId: itAdminRole._id.toString(),
+      }),
+    });
+    const itAdminThree = await api('/users', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${superToken}` },
+      body: JSON.stringify({
+        firstName: 'IT',
+        lastName: 'Administrator Three',
+        email: 'it.admin.three@securegate.io',
+        roleId: itAdminRole._id.toString(),
+      }),
+    });
+    const itAdminFour = await api('/users', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${superToken}` },
+      body: JSON.stringify({
+        firstName: 'IT',
+        lastName: 'Administrator Four',
+        email: 'it.admin.four@securegate.io',
+        roleId: itAdminRole._id.toString(),
+      }),
+    });
+    assert(
+      itAdminTwo.status === 201 && itAdminThree.status === 201 && itAdminFour.status === 409,
+      'Administrator seat governance allows at most three IT Administrators'
+    );
+
+    const rootDemotion = await api(`/users/${rootUserForLegacyCheck._id}`, {
+      method: 'PUT',
+      headers: { Authorization: `Bearer ${superToken}` },
+      body: JSON.stringify({ roleId: empRole._id.toString() }),
+    });
+    const rootDeletion = await api(`/users/${rootUserForLegacyCheck._id}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${superToken}` },
+    });
+    assert(
+      rootDemotion.status === 403 && rootDeletion.status === 403,
+      'The sole Super Admin account cannot be demoted or deleted'
+    );
+
     // Summary
     console.log('\n======================================================');
     console.log(` AUDIT RESULTS: ${passed} PASSED, ${failed} FAILED`);
