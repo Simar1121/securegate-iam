@@ -33,6 +33,7 @@ const User = (await import('./src/models/User.js')).default;
 const Role = (await import('./src/models/Role.js')).default;
 const AuditLog = (await import('./src/models/AuditLog.js')).default;
 const RevokedToken = (await import('./src/models/RevokedToken.js')).default;
+const AuthChallenge = (await import('./src/models/AuthChallenge.js')).default;
 const { seedDatabase } = await import('./src/utils/seedData.js');
 
 async function runSecurityTests() {
@@ -98,10 +99,10 @@ async function runSecurityTests() {
   }
 
   // Always start an isolated test server on port 5010; never reuse the development server.
-  let localServer;
+  const localServers = [];
   try {
     await mongoose.connection.asPromise();
-    localServer = app.listen(5010);
+    localServers.push(app.listen(5010));
   } catch (error) {
     console.error('[TEST SETUP] MongoDB test database connection failed:', error.message);
     process.exit(1);
@@ -110,11 +111,11 @@ async function runSecurityTests() {
   try {
     const check = await fetch('http://localhost:5000/api/health').catch(() => null);
     if (!check || !check.ok) {
-      localServer = app.listen(5000);
+      localServers.push(app.listen(5000));
       await new Promise((resolve) => setTimeout(resolve, 500));
     }
   } catch {
-    localServer = app.listen(5000);
+    localServers.push(app.listen(5000));
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
 
@@ -483,6 +484,42 @@ async function runSecurityTests() {
     const firstFactorMail = [...(globalThis.__securegateTestOutbox || [])]
       .reverse()
       .find((message) => message.purpose === 'LOGIN_OTP' && message.to === 'admin@securegate.io');
+    const wrongOtpCode = firstFactorMail?.code === '000000' ? '000001' : '000000';
+    const wrongOtpAttempt = await api('/auth/login/verify-otp', {
+      method: 'POST',
+      body: JSON.stringify({
+        challengeId: firstFactorOnly.data.challengeId,
+        code: wrongOtpCode,
+        deviceId: 'b'.repeat(64),
+        deviceName: 'MFA test device',
+        platform: 'Node.js test runner',
+      }),
+    });
+    const adminOtpUser = await User.findOne({ email: 'admin@securegate.io' });
+    const activeAdminChallenge = await AuthChallenge.findOne({
+      userId: adminOtpUser._id,
+      purpose: 'LOGIN_OTP',
+      consumedAt: null,
+    }).sort({ createdAt: -1 });
+    await AuthChallenge.updateOne(
+      { _id: activeAdminChallenge._id },
+      { $set: { lastSentAt: new Date(Date.now() - 60 * 1000) } }
+    );
+    const otpResend = await api('/auth/login/resend-otp', {
+      method: 'POST',
+      body: JSON.stringify({ challengeId: firstFactorOnly.data.challengeId }),
+    });
+    const challengeAfterResend = await AuthChallenge.findById(activeAdminChallenge._id);
+    const resentFirstFactorMail = [...(globalThis.__securegateTestOutbox || [])]
+      .reverse()
+      .find((message) => message.purpose === 'LOGIN_OTP' && message.to === 'admin@securegate.io');
+    assert(
+      wrongOtpAttempt.status === 401 &&
+      otpResend.status === 200 &&
+      challengeAfterResend?.attempts === 1 &&
+      challengeAfterResend?.resends === 1,
+      'OTP resend preserves the cumulative failed-attempt count and records the resend'
+    );
     assert(
       firstFactorOnly.status === 200 &&
       firstFactorOnly.data.requiresOtp === true &&
@@ -495,7 +532,7 @@ async function runSecurityTests() {
       method: 'POST',
       body: JSON.stringify({
         challengeId: firstFactorOnly.data.challengeId,
-        code: firstFactorMail?.code,
+        code: resentFirstFactorMail?.code,
         deviceId: 'b'.repeat(64),
         deviceName: 'MFA test device',
         platform: 'Node.js test runner',
@@ -613,6 +650,15 @@ async function runSecurityTests() {
       'Revoking a device immediately invalidates sessions bound to that device'
     );
 
+    const revokedDeviceReauthentication = await loginWithOtp({
+      method: 'POST',
+      body: JSON.stringify({ email: invitedEmployeeEmail, password: 'NewHire@2026' }),
+    });
+    assert(
+      revokedDeviceReauthentication.status === 403 && !revokedDeviceReauthentication.data.token,
+      'A device identifier revoked by its owner cannot be automatically trusted again'
+    );
+
     const itCannotAppointAdmin = await api('/users', {
       method: 'POST',
       headers: { Authorization: `Bearer ${itToken}` },
@@ -694,9 +740,9 @@ async function runSecurityTests() {
     console.error('Test execution uncaught exception:', error);
     failed++;
   } finally {
-    if (localServer) {
-      await new Promise((resolve) => localServer.close(resolve));
-    }
+    await Promise.all(localServers.map((server) =>
+      new Promise((resolve) => server.close(resolve))
+    ));
     await mongoose.disconnect().catch(() => {});
     process.exitCode = failed === 0 ? 0 : 1;
   }
