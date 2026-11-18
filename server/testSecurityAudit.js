@@ -353,6 +353,10 @@ async function runSecurityTests() {
       body: JSON.stringify({ email: 'admin@securegate.io', password: 'Admin@123' }),
     });
     const sessionTokenA = sessionUserLogin.data.token;
+    assert(
+      !!sessionTokenA && sessionTokenA !== superToken,
+      'Each login receives a unique JWT session identifier, even for the same user and device'
+    );
 
     const logoutRes = await api('/auth/logout', {
       method: 'POST',
@@ -366,6 +370,13 @@ async function runSecurityTests() {
     assert(
       reuseLoggedOutToken.status === 401 && reuseLoggedOutToken.data.message.includes('revoked'),
       'Previously logged out token is rejected by server blacklist (401 Unauthorized)'
+    );
+    const independentSessionStillActive = await api('/auth/me', {
+      headers: { Authorization: `Bearer ${superToken}` },
+    });
+    assert(
+      independentSessionStillActive.status === 200,
+      'Logging out one session does not revoke a separate session for the same user and device'
     );
 
     // 10B: Session Invalidation on Password Change
@@ -782,7 +793,13 @@ async function runSecurityTests() {
     });
     assert(
       rootDemotion.status === 403 && rootDeletion.status === 403,
-      'The sole Super Admin account cannot be demoted or deleted'
+      'The sole Super Admin account cannot be demoted or deleted',
+      JSON.stringify({
+        demotionStatus: rootDemotion.status,
+        demotionResponse: rootDemotion.data,
+        deletionStatus: rootDeletion.status,
+        deletionResponse: rootDeletion.data,
+      })
     );
 
     // Summary
