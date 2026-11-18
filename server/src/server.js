@@ -14,6 +14,7 @@ import permissionRoutes from './routes/permissionRoutes.js';
 import auditRoutes from './routes/auditRoutes.js';
 import dashboardRoutes from './routes/dashboardRoutes.js';
 import setupRoutes from './routes/setupRoutes.js';
+import deviceRoutes from './routes/deviceRoutes.js';
 
 // Load environment variables
 dotenv.config();
@@ -129,6 +130,7 @@ app.use('/api/roles', roleRoutes);
 app.use('/api/permissions', permissionRoutes);
 app.use('/api/audit-logs', auditRoutes);
 app.use('/api/dashboard', dashboardRoutes);
+app.use('/api/devices', deviceRoutes);
 
 // 404 Handler for undefined routes
 app.use((req, res, next) => {
