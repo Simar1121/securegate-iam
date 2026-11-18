@@ -1,133 +1,117 @@
 import crypto from 'crypto';
 import User from '../models/User.js';
-import Role from '../models/Role.js';
 import RevokedToken from '../models/RevokedToken.js';
 import { logAudit } from '../services/auditService.js';
 import { validatePasswordStrength } from '../utils/security.js';
+import AuthChallenge from '../models/AuthChallenge.js';
+import Invitation from '../models/Invitation.js';
+import { sendLoginOtpEmail } from '../services/emailService.js';
+import Device from '../models/Device.js';
+import { assessLoginRisk } from '../services/riskEngine.js';
+import { synchronizeAdminSeats, hasAdminSeat } from '../services/adminSeatService.js';
+
 
 const MAX_FAILED_ATTEMPTS = 5;
 const LOCKOUT_MINUTES = 15;
+const OTP_TTL_MS = 5 * 60 * 1000;
+const OTP_RESEND_COOLDOWN_MS = 45 * 1000;
+const OTP_MAX_ATTEMPTS = 5;
+const OTP_MAX_RESENDS = 5;
+
+const sha256 = (value) => crypto.createHash('sha256').update(value).digest('hex');
+const hashOtp = (challengeId, code) =>
+  crypto.createHmac('sha256', process.env.JWT_SECRET)
+    .update(`${challengeId}:${code}`)
+    .digest('hex');
+
+const maskEmail = (email) => {
+  const [local, domain] = String(email || '').split('@');
+  if (!local || !domain) return 'your registered email';
+  return `${local.slice(0, 2)}${'*'.repeat(Math.max(2, local.length - 2))}@${domain}`;
+};
+
+const serializeAuthenticatedUser = (user) => ({
+  id: user._id,
+  firstName: user.firstName,
+  lastName: user.lastName,
+  fullName: user.fullName,
+  email: user.email,
+  employeeId: user.employeeId,
+  department: user.department,
+  jobTitle: user.jobTitle,
+  phone: user.phone,
+  location: user.location,
+  bio: user.bio,
+  role: user.role,
+  status: user.status,
+  lastLogin: user.lastLogin,
+  mustChangePassword: user.mustChangePassword,
+});
+
+const deliverLoginChallenge = async (user, req, res) => {
+  const now = new Date();
+  await AuthChallenge.updateMany(
+    { userId: user._id, purpose: 'LOGIN_OTP', consumedAt: null },
+    { $set: { consumedAt: now } }
+  );
+
+  const challengeId = crypto.randomBytes(32).toString('hex');
+  const code = crypto.randomInt(100000, 1000000).toString();
+  const challenge = await AuthChallenge.create({
+    userId: user._id,
+    challengeIdHash: sha256(challengeId),
+    codeHash: hashOtp(challengeId, code),
+    purpose: 'LOGIN_OTP',
+    attempts: 0,
+    lastSentAt: now,
+    expiresAt: new Date(now.getTime() + OTP_TTL_MS),
+  });
+
+  try {
+    await sendLoginOtpEmail({ to: user.email, firstName: user.firstName, code, expiresInMinutes: 5 });
+  } catch (error) {
+    await AuthChallenge.updateOne({ _id: challenge._id }, { $set: { consumedAt: new Date() } });
+    console.error('[Login OTP Email Error]:', error.message);
+    return res.status(503).json({
+      success: false,
+      message: 'Unable to deliver the sign-in verification email. Contact your administrator or try again later.',
+    });
+  }
+
+  await logAudit({
+    req,
+    action: 'LOGIN_OTP_SENT',
+    category: 'AUTH',
+    actor: user._id,
+    actorEmail: user.email,
+    actorName: user.fullName,
+    actorRole: user.role?.name || 'User',
+    targetType: 'Auth',
+    targetName: user.email,
+    status: 'SUCCESS',
+    details: { method: 'EMAIL', expiresInSeconds: 300 },
+  });
+
+  return res.status(200).json({
+    success: true,
+    requiresOtp: true,
+    message: 'A verification code has been sent to your registered email address.',
+    challengeId,
+    maskedEmail: maskEmail(user.email),
+    expiresInSeconds: 300,
+    resendAfterSeconds: 45,
+  });
+};
+
 
 // @desc    Register a new user / employee
 // @route   POST /api/auth/register
 // @access  Public
 export const register = async (_req, res) => {
-  return res.status(403).json({ success: false, message: 'Public self-registration is disabled. Contact an organization administrator.' });
-  /* Legacy implementation retained temporarily for reference; unreachable. */
-  try {
-    const { firstName, lastName, email, password, department, jobTitle } = req.body;
-
-    if (!firstName || !lastName || !email || !password) {
-      return res.status(400).json({
-        success: false,
-        message: 'Please provide all required fields: first name, last name, email, and password.',
-      });
-    }
-
-    const emailNormalized = email.toLowerCase().trim();
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(emailNormalized)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Please provide a valid corporate email address.',
-      });
-    }
-
-    // Password strength check
-    const pwdCheck = validatePasswordStrength(password);
-    if (!pwdCheck.valid) {
-      return res.status(400).json({
-        success: false,
-        message: pwdCheck.message,
-      });
-    }
-
-    const existingUser = await User.findOne({ email: emailNormalized });
-    if (existingUser) {
-      return res.status(400).json({
-        success: false,
-        message: 'A user with this email address already exists.',
-      });
-    }
-
-    // Public self-registration ALWAYS maps strictly to the default Employee role
-    let defaultRole = await Role.findOne({ name: 'Employee', isDefault: true });
-    if (!defaultRole) {
-      defaultRole = await Role.findOne({ isDefault: true }) || await Role.findOne({ name: 'Employee' });
-    }
-
-    if (!defaultRole) {
-      return res.status(500).json({
-        success: false,
-        message: 'Default employee role configuration is missing. Contact system administrator.',
-      });
-    }
-
-    const user = new User({
-      firstName: firstName.trim(),
-      lastName: lastName.trim(),
-      email: emailNormalized,
-      password,
-      department: department?.trim() || 'Engineering',
-      jobTitle: jobTitle?.trim() || 'Software Engineer',
-      role: defaultRole._id,
-      status: 'Active',
-      tokenVersion: 0,
-    });
-
-    await user.save();
-
-    // Populate role
-    await user.populate({
-      path: 'role',
-      populate: { path: 'permissions', model: 'Permission' },
-    });
-
-    const token = user.generateAuthToken();
-
-    // Log audit
-    await logAudit({
-      req,
-      action: 'USER_REGISTER',
-      category: 'AUTH',
-      actor: user._id,
-      actorEmail: user.email,
-      actorName: user.fullName,
-      actorRole: user.role?.name || 'Employee',
-      targetType: 'User',
-      targetId: user._id,
-      targetName: user.fullName,
-      status: 'SUCCESS',
-      details: { email: user.email, role: user.role?.name },
-    });
-
-    res.status(201).json({
-      success: true,
-      message: 'Account registered successfully.',
-      token,
-      user: {
-        id: user._id,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        fullName: user.fullName,
-        email: user.email,
-        employeeId: user.employeeId,
-        department: user.department,
-        jobTitle: user.jobTitle,
-        phone: user.phone,
-        location: user.location,
-        bio: user.bio,
-        role: user.role,
-        status: user.status,
-      },
-    });
-  } catch (error) {
-    console.error('[Register Error]:', error);
-    res.status(500).json({
-      success: false,
-      message: error.message || 'Server error during registration.',
-    });
-  }
+  return res.status(403).json({
+    success: false,
+    message: 'Public self-registration is disabled. Contact an organization administrator.',
+  });
 };
 
 // @desc    Authenticate user & get JWT token
@@ -135,19 +119,26 @@ export const register = async (_req, res) => {
 // @access  Public
 export const login = async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const { email, identifier, password } = req.body || {};
+    const loginIdentifier = String(identifier || email || '').trim();
 
-    if (!email || !password) {
+    if (!loginIdentifier || !password) {
       return res.status(400).json({
         success: false,
-        message: 'Please provide both email and password.',
+        message: 'Please provide your registered email or employee ID and password.',
       });
     }
 
-    const normalizedEmail = email.toLowerCase().trim();
+    const normalizedIdentifier = loginIdentifier.toLowerCase();
+    const identityQuery = {
+      $or: [
+        { email: normalizedIdentifier },
+        { employeeId: loginIdentifier.toUpperCase() },
+      ],
+    };
 
-    // Find user including password
-    const user = await User.findOne({ email: normalizedEmail })
+    // Find user including password. Email and employee ID are both supported.
+    const user = await User.findOne(identityQuery)
       .select('+password')
       .populate({
         path: 'role',
@@ -160,11 +151,11 @@ export const login = async (req, res) => {
         action: 'LOGIN_FAILED',
         category: 'AUTH',
         actor: null,
-        actorEmail: normalizedEmail,
+        actorEmail: normalizedIdentifier,
         actorName: 'Anonymous / Unknown',
         actorRole: 'None',
         targetType: 'Auth',
-        targetName: normalizedEmail,
+        targetName: normalizedIdentifier,
         status: 'FAILED',
         details: { reason: 'User not found' },
       });
@@ -172,6 +163,13 @@ export const login = async (req, res) => {
       return res.status(401).json({
         success: false,
         message: 'Invalid email or password credentials.',
+      });
+    }
+
+    if (user.invitationPending) {
+      return res.status(403).json({
+        success: false,
+        message: 'Your employee invitation is still pending. Open the invitation email and set your password before signing in.',
       });
     }
 
@@ -322,54 +320,29 @@ export const login = async (req, res) => {
       });
     }
 
-    // 4. Successful login: reset brute-force counters
-    user.failedLoginAttempts = 0;
-    user.lockUntil = null;
-    user.lastLogin = new Date();
-    await user.save();
+    // Reconcile pre-existing administrator records without deleting or
+    // demoting them. Accounts beyond the fixed seat inventory cannot sign in
+    // with administrator privileges until an owner reviews their assignment.
+    if (['Super Admin', 'IT Administrator'].includes(user.role.name)) {
+      await synchronizeAdminSeats();
+      if (!await hasAdminSeat(user.role.name, user._id)) {
+        await logAudit({
+          req, action: 'ADMIN_SEAT_ACCESS_DENIED', category: 'SECURITY',
+          actor: user._id, actorEmail: user.email, actorName: user.fullName,
+          actorRole: user.role.name, targetType: 'Auth', targetName: user.email,
+          status: 'WARNING',
+          details: { reason: 'No administrator seat is assigned to this account.' },
+        });
+        return res.status(403).json({
+          success: false,
+          message: 'This administrator account does not hold an available organization administrator seat. Contact the Super Admin.',
+        });
+      }
+    }
 
-    const token = user.generateAuthToken();
-
-    // Log successful login
-    await logAudit({
-      req,
-      action: 'LOGIN_SUCCESS',
-      category: 'AUTH',
-      actor: user._id,
-      actorEmail: user.email,
-      actorName: user.fullName,
-      actorRole: user.role?.name || 'User',
-      targetType: 'Auth',
-      targetName: user.email,
-      status: 'SUCCESS',
-      details: {
-        role: user.role?.name,
-        employeeId: user.employeeId,
-      },
-    });
-
-    res.json({
-      success: true,
-      message: 'Login successful.',
-      token,
-      user: {
-        id: user._id,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        fullName: user.fullName,
-        email: user.email,
-        employeeId: user.employeeId,
-        department: user.department,
-        jobTitle: user.jobTitle,
-        phone: user.phone,
-        location: user.location,
-        bio: user.bio,
-        role: user.role,
-        status: user.status,
-        lastLogin: user.lastLogin,
-        mustChangePassword: user.mustChangePassword,
-      },
-    });
+    // Password verification is only the first factor. No access JWT is
+    // issued and lastLogin is not updated until the email OTP is verified.
+    return await deliverLoginChallenge(user, req, res);
   } catch (error) {
     console.error('[Login Error]:', error);
     res.status(500).json({
@@ -627,5 +600,325 @@ export const updateProfile = async (req, res) => {
       success: false,
       message: 'Server error updating profile.',
     });
+  }
+};
+
+ 
+// @desc    Verify the email OTP and issue the authenticated session
+// @route   POST /api/auth/login/verify-otp
+// @access  Public (challenge-bound)
+export const verifyLoginOtp = async (req, res) => {
+  try {
+    const { challengeId, code } = req.body || {};
+    if (typeof challengeId !== 'string' || !/^[a-f0-9]{64}$/i.test(challengeId) ||
+        typeof code !== 'string' || !/^\d{6}$/.test(code)) {
+      return res.status(400).json({ success: false, message: 'Enter the six-digit verification code.' });
+    }
+
+    const now = new Date();
+    const challengeIdHash = sha256(challengeId);
+    const challenge = await AuthChallenge.findOne({
+      challengeIdHash,
+      purpose: 'LOGIN_OTP',
+      consumedAt: null,
+      expiresAt: { $gt: now },
+    });
+
+    if (!challenge) {
+      return res.status(400).json({ success: false, message: 'The verification challenge is invalid or has expired. Sign in again.' });
+    }
+    if (challenge.attempts >= OTP_MAX_ATTEMPTS) {
+      return res.status(429).json({ success: false, message: 'Too many incorrect verification codes. Sign in again to request a new code.' });
+    }
+
+    const expected = Buffer.from(challenge.codeHash, 'hex');
+    const supplied = Buffer.from(hashOtp(challengeId, code), 'hex');
+    const matches = expected.length === supplied.length && crypto.timingSafeEqual(expected, supplied);
+
+    if (!matches) {
+      const nextAttempts = challenge.attempts + 1;
+      const update = { $inc: { attempts: 1 } };
+      if (nextAttempts >= OTP_MAX_ATTEMPTS) update.$set = { consumedAt: now };
+      await AuthChallenge.updateOne(
+        { _id: challenge._id, consumedAt: null, attempts: challenge.attempts },
+        update
+      );
+      await logAudit({
+        req, action: 'LOGIN_OTP_FAILED', category: 'SECURITY',
+        actor: challenge.userId, actorEmail: 'unknown', actorName: 'Authentication challenge',
+        actorRole: 'Unknown', targetType: 'Auth', status: 'FAILED',
+        details: { attemptCount: nextAttempts, maxAttempts: OTP_MAX_ATTEMPTS },
+      });
+      return res.status(nextAttempts >= OTP_MAX_ATTEMPTS ? 429 : 401).json({
+        success: false,
+        message: nextAttempts >= OTP_MAX_ATTEMPTS
+          ? 'Too many incorrect verification codes. Sign in again to request a new code.'
+          : `Incorrect verification code. ${OTP_MAX_ATTEMPTS - nextAttempts} attempt(s) remaining.`,
+      });
+    }
+
+    // Atomic consume ensures a correct OTP can only produce one session.
+    const consumed = await AuthChallenge.findOneAndUpdate(
+      { _id: challenge._id, codeHash: challenge.codeHash, consumedAt: null, expiresAt: { $gt: now }, attempts: { $lt: OTP_MAX_ATTEMPTS } },
+      { $set: { consumedAt: now } },
+      { new: true }
+    );
+    if (!consumed) {
+      return res.status(409).json({ success: false, message: 'This verification code has already been used. Sign in again.' });
+    }
+
+    const user = await User.findById(consumed.userId).populate({
+      path: 'role',
+      populate: { path: 'permissions', model: 'Permission' },
+    });
+    if (!user || user.invitationPending || user.status !== 'Active' || !user.role || user.role.status !== 'Active') {
+      return res.status(403).json({ success: false, message: 'This account is not currently permitted to sign in.' });
+    }
+    if (user.lockUntil && user.lockUntil > now) {
+      return res.status(423).json({ success: false, message: 'This account is temporarily locked. Try again after the lockout period.' });
+    }
+    if (['Super Admin', 'IT Administrator'].includes(user.role.name) &&
+        !await hasAdminSeat(user.role.name, user._id)) {
+      return res.status(403).json({
+        success: false,
+        message: 'This administrator account no longer holds an organization administrator seat. Contact the Super Admin.',
+      });
+    }
+
+    const deviceId = req.body?.deviceId;
+    if (typeof deviceId !== 'string' || !/^[a-f0-9]{64}$/i.test(deviceId)) {
+      return res.status(400).json({ success: false, message: 'A valid SecureGate device identifier is required to establish a session.' });
+    }
+
+    const deviceIdHash = crypto.createHmac('sha256', process.env.JWT_SECRET).update(deviceId).digest('hex');
+    const userAgent = String(req.get('user-agent') || 'Unknown').slice(0, 255);
+    const ipAddress = String(req.ip || '').slice(0, 64);
+    const existingDevice = await Device.findOne({ userId: user._id, deviceIdHash });
+    const risk = assessLoginRisk({
+      device: existingDevice,
+      ipAddress,
+      userAgent,
+      otpAttempts: challenge.attempts,
+    });
+
+    const deviceUpdate = {
+      deviceName: String(req.body?.deviceName || 'Browser device').slice(0, 100),
+      platform: String(req.body?.platform || 'Unknown').slice(0, 80),
+      userAgent,
+      lastIpAddress: ipAddress,
+      lastSeenAt: now,
+      lastLoginAt: now,
+      lastRiskScore: risk.score,
+      lastRiskLevel: risk.level,
+      trustScore: Math.max(0, 100 - risk.score),
+      status: existingDevice?.status === 'Revoked' ? 'Revoked' : (risk.decision === 'DENY' ? 'Blocked' : 'Trusted'),
+    };
+
+    const device = await Device.findOneAndUpdate(
+      { userId: user._id, deviceIdHash },
+      {
+        $set: deviceUpdate,
+        $setOnInsert: { userId: user._id, deviceIdHash, firstSeenAt: now },
+      },
+      { new: true, upsert: true, setDefaultsOnInsert: true }
+    );
+
+    await logAudit({
+      req,
+      action: risk.decision === 'DENY' ? 'LOGIN_RISK_BLOCKED' : (existingDevice ? 'DEVICE_RISK_EVALUATED' : 'DEVICE_REGISTERED'),
+      category: 'SECURITY',
+      actor: user._id,
+      actorEmail: user.email,
+      actorName: user.fullName,
+      actorRole: user.role?.name || 'User',
+      targetType: 'Device',
+      targetId: device._id,
+      targetName: device.deviceName,
+      status: risk.decision === 'DENY' ? 'WARNING' : 'SUCCESS',
+      details: {
+        riskScore: risk.score,
+        riskLevel: risk.level,
+        decision: risk.decision,
+        reasons: risk.reasons,
+        deviceStatus: device.status,
+      },
+    });
+
+    if (risk.decision === 'DENY' || device.status !== 'Trusted') {
+      return res.status(403).json({
+        success: false,
+        message: 'SecureGate blocked this sign-in because the device or login context was assessed as high risk. Contact your organization administrator.',
+      });
+    }
+
+    user.failedLoginAttempts = 0;
+    user.lockUntil = null;
+    user.lastLogin = now;
+    if (!user.emailVerifiedAt) user.emailVerifiedAt = now;
+    await user.save();
+
+    const token = user.generateAuthToken(deviceIdHash);
+    await logAudit({
+      req,
+      action: 'LOGIN_SUCCESS',
+      category: 'AUTH',
+      actor: user._id,
+      actorEmail: user.email,
+      actorName: user.fullName,
+      actorRole: user.role?.name || 'User',
+      targetType: 'Auth',
+      targetName: user.email,
+      status: 'SUCCESS',
+      details: { role: user.role?.name, employeeId: user.employeeId, mfa: 'EMAIL_OTP' },
+    });
+
+    return res.json({
+      success: true,
+      message: 'Multi-factor authentication successful.',
+      token,
+      user: serializeAuthenticatedUser(user),
+    });
+  } catch (error) {
+    console.error('[Verify Login OTP Error]:', error.message);
+    return res.status(500).json({ success: false, message: 'Unable to verify the sign-in code.' });
+  }
+};
+
+// @desc    Resend the current sign-in OTP
+// @route   POST /api/auth/login/resend-otp
+// @access  Public (challenge-bound)
+export const resendLoginOtp = async (req, res) => {
+  try {
+    const { challengeId } = req.body || {};
+    if (typeof challengeId !== 'string' || !/^[a-f0-9]{64}$/i.test(challengeId)) {
+      return res.status(400).json({ success: false, message: 'Invalid verification challenge. Sign in again.' });
+    }
+
+    const now = new Date();
+    const challenge = await AuthChallenge.findOne({
+      challengeIdHash: sha256(challengeId), purpose: 'LOGIN_OTP',
+      consumedAt: null, expiresAt: { $gt: now }, attempts: { $lt: OTP_MAX_ATTEMPTS },
+    });
+    if (!challenge) {
+      return res.status(400).json({ success: false, message: 'The verification challenge is invalid or expired. Sign in again.' });
+    }
+    const resendCount = challenge.resends || 0;
+    if (resendCount >= OTP_MAX_RESENDS) {
+      return res.status(429).json({
+        success: false,
+        message: 'The maximum number of code resends has been reached. Sign in again to start a new verification challenge.',
+      });
+    }
+
+    const waitMs = OTP_RESEND_COOLDOWN_MS - (now.getTime() - challenge.lastSentAt.getTime());
+    if (waitMs > 0) {
+      return res.status(429).json({
+        success: false,
+        message: 'Please wait before requesting another code.',
+        retryAfterSeconds: Math.ceil(waitMs / 1000),
+      });
+    }
+
+    const user = await User.findById(challenge.userId);
+    if (!user || user.status !== 'Active' || user.invitationPending) {
+      return res.status(403).json({ success: false, message: 'This account is not currently permitted to sign in.' });
+    }
+
+    const code = crypto.randomInt(100000, 1000000).toString();
+    const updated = await AuthChallenge.updateOne(
+      {
+        _id: challenge._id,
+        consumedAt: null,
+        lastSentAt: challenge.lastSentAt,
+        attempts: challenge.attempts,
+        $or: [{ resends: resendCount }, { resends: { $exists: false } }],
+      },
+      {
+        $set: {
+          codeHash: hashOtp(challengeId, code),
+          lastSentAt: now,
+          expiresAt: new Date(now.getTime() + OTP_TTL_MS),
+        },
+        $inc: { resends: 1 },
+      }
+    );
+    if (!updated.modifiedCount) {
+      return res.status(409).json({ success: false, message: 'The verification challenge changed. Request a new sign-in.' });
+    }
+
+    try {
+      await sendLoginOtpEmail({ to: user.email, firstName: user.firstName, code, expiresInMinutes: 5 });
+    } catch (error) {
+      await AuthChallenge.updateOne({ _id: challenge._id }, { $set: { consumedAt: new Date() } });
+      console.error('[Resend Login OTP Email Error]:', error.message);
+      return res.status(503).json({ success: false, message: 'Unable to deliver the verification email. Sign in again later.' });
+    }
+
+    return res.json({
+      success: true,
+      message: 'A new verification code has been sent.',
+      maskedEmail: maskEmail(user.email),
+      expiresInSeconds: 300,
+      resendAfterSeconds: 45,
+      resendsRemaining: Math.max(0, OTP_MAX_RESENDS - resendCount - 1),
+    });
+  } catch (error) {
+    console.error('[Resend Login OTP Error]:', error.message);
+    return res.status(500).json({ success: false, message: 'Unable to resend the verification code.' });
+  }
+};
+
+// @desc    Accept an employee invitation, verify email and set an initial password
+// @route   POST /api/auth/invitations/accept
+// @access  Public (one-time invitation token)
+export const acceptInvitation = async (req, res) => {
+  try {
+    const { token, password, confirmPassword } = req.body || {};
+    if (typeof token !== 'string' || !/^[a-f0-9]{64}$/i.test(token)) {
+      return res.status(400).json({ success: false, message: 'Invalid or expired invitation link.' });
+    }
+    if (typeof password !== 'string' || typeof confirmPassword !== 'string' || password !== confirmPassword) {
+      return res.status(400).json({ success: false, message: 'Enter matching password and confirmation.' });
+    }
+    const passwordCheck = validatePasswordStrength(password);
+    if (!passwordCheck.valid) {
+      return res.status(400).json({ success: false, message: passwordCheck.message });
+    }
+
+    const now = new Date();
+    const invitation = await Invitation.findOneAndUpdate(
+      { tokenHash: sha256(token), acceptedAt: null, revokedAt: null, expiresAt: { $gt: now } },
+      { $set: { acceptedAt: now } },
+      { new: true }
+    );
+    if (!invitation) {
+      return res.status(400).json({ success: false, message: 'This invitation is invalid, expired or already used. Contact your administrator for a new invitation.' });
+    }
+
+    const user = await User.findById(invitation.userId).select('+password');
+    if (!user || !user.invitationPending) {
+      return res.status(409).json({ success: false, message: 'This employee invitation is no longer active.' });
+    }
+
+    user.password = password;
+    user.invitationPending = false;
+    user.emailVerifiedAt = now;
+    user.mustChangePassword = false;
+    user.passwordChangedAt = now;
+    user.tokenVersion = (user.tokenVersion || 0) + 1;
+    await user.save();
+
+    await logAudit({
+      req, action: 'INVITATION_ACCEPTED', category: 'AUTH',
+      actor: user._id, actorEmail: user.email, actorName: user.fullName,
+      actorRole: 'Employee', targetType: 'User', targetId: user._id,
+      targetName: user.fullName, status: 'SUCCESS',
+      details: { emailVerified: true, passwordSet: true },
+    });
+
+    return res.json({ success: true, message: 'Your email has been verified and password set. You can now sign in with email OTP verification.' });
+  } catch (error) {
+    console.error('[Accept Invitation Error]:', error.message);
+    return res.status(500).json({ success: false, message: 'Unable to accept the invitation.' });
   }
 };

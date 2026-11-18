@@ -239,7 +239,24 @@ export const updateRole = async (req, res) => {
       });
     }
 
-    // Safeguard: Cannot rename or deactivate Super Admin
+    // Privileged role names and availability are policy identifiers used by
+    // administrator seat governance. They cannot be renamed or deactivated.
+    if (['Super Admin', 'IT Administrator'].includes(role.name)) {
+      if (name && name.trim() !== role.name) {
+        return res.status(400).json({
+          success: false,
+          message: `System role name "${role.name}" cannot be modified.`,
+        });
+      }
+      if (status && status !== 'Active') {
+        return res.status(400).json({
+          success: false,
+          message: `System role "${role.name}" cannot be deactivated.`,
+        });
+      }
+    }
+
+    // Retain the explicit Super Admin guard for clear policy feedback.
     if (role.name === 'Super Admin') {
       if (name && name !== 'Super Admin') {
         return res.status(400).json({

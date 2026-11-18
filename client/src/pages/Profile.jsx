@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
+import { deviceService } from '../services/deviceService';
 import {
   User,
   KeyRound,
@@ -54,6 +55,9 @@ export const Profile = () => {
     confirmPassword: '',
   });
   const [changingPass, setChangingPass] = useState(false);
+  const [devices, setDevices] = useState([]);
+  const [loadingDevices, setLoadingDevices] = useState(false);
+  const [revokingDeviceId, setRevokingDeviceId] = useState('');
 
   useEffect(() => {
     if (user) {
@@ -107,6 +111,43 @@ export const Profile = () => {
       toast.error(err.response?.data?.message || 'Failed to change password.');
     } finally {
       setChangingPass(false);
+    }
+  };
+
+  useEffect(() => {
+    if (activeTab !== 'security') return;
+    let active = true;
+    const loadDevices = async () => {
+      try {
+        setLoadingDevices(true);
+        const result = await deviceService.getMyDevices();
+        if (active && result.success) setDevices(result.data || []);
+      } catch (error) {
+        if (active) toast.error(error.response?.data?.message || 'Unable to load trusted devices.');
+      } finally {
+        if (active) setLoadingDevices(false);
+      }
+    };
+    loadDevices();
+    return () => { active = false; };
+  }, [activeTab]);
+
+  const handleRevokeDevice = async (device) => {
+    if (device.isCurrentDevice) {
+      toast.warning('Sign out from this device instead of revoking its active session here.');
+      return;
+    }
+    try {
+      setRevokingDeviceId(device._id);
+      const result = await deviceService.revokeMyDevice(device._id);
+      toast.success(result.message || 'Device access revoked.');
+      setDevices((current) => current.map((item) =>
+        item._id === device._id ? { ...item, status: 'Revoked' } : item
+      ));
+    } catch (error) {
+      toast.error(error.response?.data?.message || 'Unable to revoke this device.');
+    } finally {
+      setRevokingDeviceId('');
     }
   };
 
@@ -376,7 +417,8 @@ export const Profile = () => {
 
       {/* Tab 3: Password & Security */}
       {activeTab === 'security' && (
-        <div className="max-w-xl p-6 rounded-2xl bg-charcoal-900 border border-charcoal-800 shadow-xl space-y-4">
+        <>
+        <div className="max-w-3xl p-6 rounded-2xl bg-charcoal-900 border border-charcoal-800 shadow-xl space-y-4">
           <div>
             <h2 className="text-base font-bold text-white flex items-center gap-2">
               <KeyRound className="w-5 h-5 text-violet-400" />
@@ -450,6 +492,47 @@ export const Profile = () => {
             </div>
           </form>
         </div>
+
+        <div className="max-w-3xl p-6 rounded-2xl bg-charcoal-900 border border-charcoal-800 shadow-xl space-y-4">
+          <div>
+            <h2 className="text-base font-bold text-white flex items-center gap-2">
+              <Shield className="w-5 h-5 text-violet-400" />
+              Trusted Devices
+            </h2>
+            <p className="text-xs text-slate-400 mt-1">Sessions are bound to a verified device. Revoking a device immediately blocks its existing access tokens.</p>
+          </div>
+
+          {loadingDevices ? (
+            <p className="text-xs text-slate-400">Loading registered devices...</p>
+          ) : devices.length === 0 ? (
+            <p className="text-xs text-slate-400">No registered devices were found.</p>
+          ) : (
+            <div className="space-y-2">
+              {devices.map((device) => (
+                <div key={device._id} className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-xl border border-charcoal-800 bg-charcoal-950 p-4">
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-sm font-semibold text-slate-200">{device.deviceName || 'Browser device'}</span>
+                      <span className={`text-[10px] px-2 py-0.5 rounded-full font-semibold ${device.status === 'Trusted' ? 'bg-emerald-500/10 text-emerald-300' : device.status === 'Blocked' ? 'bg-rose-500/10 text-rose-300' : 'bg-slate-500/10 text-slate-300'}`}>{device.status}</span>
+                      {device.isCurrentDevice && <span className="text-[10px] px-2 py-0.5 rounded-full bg-violet-500/10 text-violet-300">Current device</span>}
+                    </div>
+                    <p className="mt-1 text-[11px] text-slate-500">{device.platform || 'Unknown platform'} · Last used {formatDate(device.lastSeenAt)}</p>
+                    <p className="mt-1 text-[11px] text-slate-500">Risk: {device.lastRiskLevel || 'Low'} ({device.lastRiskScore ?? 0}/100) · IP: {device.lastIpAddress || 'Unavailable'}</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => handleRevokeDevice(device)}
+                    disabled={device.isCurrentDevice || device.status !== 'Trusted' || revokingDeviceId === device._id}
+                    className="shrink-0 px-3 py-2 rounded-lg border border-rose-500/30 text-rose-300 text-xs font-semibold hover:bg-rose-500/10 disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    {revokingDeviceId === device._id ? 'Revoking...' : 'Revoke device'}
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+        </>
       )}
     </div>
   );
