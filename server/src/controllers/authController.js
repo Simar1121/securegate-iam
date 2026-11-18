@@ -264,7 +264,7 @@ export const login = async (req, res) => {
         actorName: 'Anonymous / Unknown',
         actorRole: 'None',
         targetType: 'Auth',
-        targetName: normalizedEmail,
+        targetName: normalizedIdentifier,
         status: 'FAILED',
         details: { reason: 'User not found' },
       });
@@ -272,6 +272,13 @@ export const login = async (req, res) => {
       return res.status(401).json({
         success: false,
         message: 'Invalid email or password credentials.',
+      });
+    }
+
+    if (user.invitationPending) {
+      return res.status(403).json({
+        success: false,
+        message: 'Your employee invitation is still pending. Open the invitation email and set your password before signing in.',
       });
     }
 
