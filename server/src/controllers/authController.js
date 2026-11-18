@@ -7,6 +7,8 @@ import { validatePasswordStrength } from '../utils/security.js';
 import AuthChallenge from '../models/AuthChallenge.js';
 import Invitation from '../models/Invitation.js';
 import { sendLoginOtpEmail } from '../services/emailService.js';
+import Device from '../models/Device.js';
+import { assessLoginRisk } from '../services/riskEngine.js';
 
 
 const MAX_FAILED_ATTEMPTS = 5;
@@ -176,7 +178,7 @@ export const register = async (_req, res) => {
       populate: { path: 'permissions', model: 'Permission' },
     });
 
-    const token = user.generateAuthToken();
+    const token = user.generateAuthToken(deviceIdHash);
 
     // Log audit
     await logAudit({
@@ -765,6 +767,72 @@ export const verifyLoginOtp = async (req, res) => {
     }
     if (user.lockUntil && user.lockUntil > now) {
       return res.status(423).json({ success: false, message: 'This account is temporarily locked. Try again after the lockout period.' });
+    }
+
+    const deviceId = req.body?.deviceId;
+    if (typeof deviceId !== 'string' || !/^[a-f0-9]{64}$/i.test(deviceId)) {
+      return res.status(400).json({ success: false, message: 'A valid SecureGate device identifier is required to establish a session.' });
+    }
+
+    const deviceIdHash = crypto.createHmac('sha256', process.env.JWT_SECRET).update(deviceId).digest('hex');
+    const userAgent = String(req.get('user-agent') || 'Unknown').slice(0, 255);
+    const ipAddress = String(req.ip || '').slice(0, 64);
+    const existingDevice = await Device.findOne({ userId: user._id, deviceIdHash });
+    const risk = assessLoginRisk({
+      device: existingDevice,
+      ipAddress,
+      userAgent,
+      otpAttempts: challenge.attempts,
+    });
+
+    const deviceUpdate = {
+      deviceName: String(req.body?.deviceName || 'Browser device').slice(0, 100),
+      platform: String(req.body?.platform || 'Unknown').slice(0, 80),
+      userAgent,
+      lastIpAddress: ipAddress,
+      lastSeenAt: now,
+      lastLoginAt: now,
+      lastRiskScore: risk.score,
+      lastRiskLevel: risk.level,
+      trustScore: Math.max(0, 100 - risk.score),
+      status: risk.decision === 'DENY' ? 'Blocked' : 'Trusted',
+    };
+
+    const device = await Device.findOneAndUpdate(
+      { userId: user._id, deviceIdHash },
+      {
+        $set: deviceUpdate,
+        $setOnInsert: { userId: user._id, deviceIdHash, firstSeenAt: now },
+      },
+      { new: true, upsert: true, setDefaultsOnInsert: true }
+    );
+
+    await logAudit({
+      req,
+      action: risk.decision === 'DENY' ? 'LOGIN_RISK_BLOCKED' : (existingDevice ? 'DEVICE_RISK_EVALUATED' : 'DEVICE_REGISTERED'),
+      category: 'SECURITY',
+      actor: user._id,
+      actorEmail: user.email,
+      actorName: user.fullName,
+      actorRole: user.role?.name || 'User',
+      targetType: 'Device',
+      targetId: device._id,
+      targetName: device.deviceName,
+      status: risk.decision === 'DENY' ? 'WARNING' : 'SUCCESS',
+      details: {
+        riskScore: risk.score,
+        riskLevel: risk.level,
+        decision: risk.decision,
+        reasons: risk.reasons,
+        deviceStatus: device.status,
+      },
+    });
+
+    if (risk.decision === 'DENY' || device.status !== 'Trusted') {
+      return res.status(403).json({
+        success: false,
+        message: 'SecureGate blocked this sign-in because the device or login context was assessed as high risk. Contact your organization administrator.',
+      });
     }
 
     user.failedLoginAttempts = 0;
