@@ -548,7 +548,7 @@ async function runSecurityTests() {
       method: 'POST',
       body: JSON.stringify({
         challengeId: firstFactorOnly.data.challengeId,
-        code: firstFactorMail?.code,
+        code: resentFirstFactorMail?.code,
         deviceId: 'b'.repeat(64),
         deviceName: 'MFA test device',
         platform: 'Node.js test runner',
@@ -716,6 +716,28 @@ async function runSecurityTests() {
     assert(
       itAdminTwo.status === 201 && itAdminThree.status === 201 && itAdminFour.status === 409,
       'Administrator seat governance allows at most three IT Administrators'
+    );
+
+    const legacyOverflowAdmin = new User({
+      firstName: 'Legacy',
+      lastName: 'Overflow Admin',
+      email: 'legacy.overflow.it@securegate.io',
+      password: 'LegacyOverflow@2026',
+      role: itAdminRole._id,
+      status: 'Active',
+    });
+    await legacyOverflowAdmin.save();
+    const legacyOverflowLogin = await api('/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({
+        email: 'legacy.overflow.it@securegate.io',
+        password: 'LegacyOverflow@2026',
+      }),
+    });
+    assert(
+      legacyOverflowLogin.status === 403 &&
+      String(legacyOverflowLogin.data.message || '').toLowerCase().includes('administrator seat'),
+      'Legacy excess IT Administrator records are preserved but cannot authenticate without a seat'
     );
 
     const rootDemotion = await api(`/users/${rootUserForLegacyCheck._id}`, {
