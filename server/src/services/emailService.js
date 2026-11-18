@@ -38,7 +38,7 @@ const getTransporter = () => {
   return transporter;
 };
 
-const sendMail = async ({ to, subject, text, html, testPayload }) => {
+const sendMail = async ({ to, subject, text, html, testPayload, messageType }) => {
   // Tests use an in-memory outbox so the full OTP flow is exercised without
   // sending real email or exposing codes in logs. This path is test-only.
   if (process.env.NODE_ENV === 'test') {
@@ -49,7 +49,37 @@ const sendMail = async ({ to, subject, text, html, testPayload }) => {
 
   const from = process.env.EMAIL_FROM || process.env.SMTP_USER;
   if (!from) throw new Error('EMAIL_FROM or SMTP_USER must be configured.');
-  return getTransporter().sendMail({ from, to, subject, text, html });
+  try {
+    const info = await getTransporter().sendMail({ from, to, subject, text, html });
+    const accepted = Array.isArray(info.accepted) ? info.accepted : [];
+    const rejected = Array.isArray(info.rejected) ? info.rejected : [];
+    const recipientWasAccepted = accepted.some(
+      (address) => String(address).toLowerCase() === String(to).toLowerCase()
+    );
+
+    console.info('[Email SMTP Result]', {
+      messageType,
+      messageId: info.messageId,
+      recipientAccepted: recipientWasAccepted,
+      acceptedCount: accepted.length,
+      rejectedCount: rejected.length,
+      response: info.response,
+    });
+
+    if (!recipientWasAccepted) {
+      throw new Error('Gmail SMTP did not accept the recipient address.');
+    }
+
+    return info;
+  } catch (error) {
+    console.error('[Email SMTP Error]', {
+      messageType,
+      code: error.code,
+      responseCode: error.responseCode,
+      message: error.message,
+    });
+    throw error;
+  }
 };
 
 export const sendLoginOtpEmail = async ({ to, firstName, code, expiresInMinutes = 5 }) => {
@@ -58,6 +88,7 @@ export const sendLoginOtpEmail = async ({ to, firstName, code, expiresInMinutes 
     to,
     subject: 'Your SecureGate sign-in verification code',
     text: `Hello ${firstName || 'there'}, your SecureGate verification code is ${code}. It expires in ${expiresInMinutes} minutes. Do not share this code with anyone.`,
+    messageType: 'login OTP',
     testPayload: { purpose: 'LOGIN_OTP', code },
     html: `<div style="font-family:Arial,sans-serif;max-width:520px;margin:auto;color:#172033"><h2>SecureGate sign-in verification</h2><p>Hello ${safeName},</p><p>Use this one-time verification code to finish signing in:</p><div style="font-size:30px;font-weight:700;letter-spacing:8px;padding:18px;background:#f3f4f6;text-align:center;border-radius:10px">${code}</div><p>This code expires in ${expiresInMinutes} minutes and can only be used once.</p><p>Never share this code. SecureGate support will never ask you for it.</p></div>`,
   });
@@ -70,6 +101,7 @@ export const sendEmployeeInvitationEmail = async ({ to, firstName, invitationUrl
     to,
     subject: 'You have been invited to SecureGate',
     text: `Hello ${firstName || 'there'}, you have been invited to join SecureGate. Set your password using this one-time link: ${invitationUrl} . The invitation expires in ${expiresInHours} hours.`,
+    messageType: 'employee invitation',
     testPayload: { purpose: 'INVITATION', invitationUrl },
     html: `<div style="font-family:Arial,sans-serif;max-width:520px;margin:auto;color:#172033"><h2>Welcome to SecureGate</h2><p>Hello ${safeName},</p><p>Your organization has created an account for you. Use the secure invitation link below to verify your email and set your own password.</p><p><a href="${safeUrl}" style="display:inline-block;padding:12px 20px;background:#6d4aff;color:#fff;text-decoration:none;border-radius:8px">Accept invitation</a></p><p>This link expires in ${expiresInHours} hours and can only be used once.</p><p>If you were not expecting this invitation, you can ignore this email.</p></div>`,
   });
