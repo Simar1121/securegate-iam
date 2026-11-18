@@ -16,6 +16,11 @@ export const userService = {
     return res.data;
   },
 
+  resendInvitation: async (userId) => {
+    const res = await api.post(`/users/${userId}/resend-invitation`);
+    return res.data;
+  },
+
   updateUser: async (id, userData) => {
     const res = await api.put(`/users/${id}`, userData);
     return res.data;
