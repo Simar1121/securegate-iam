@@ -38,7 +38,15 @@ const getTransporter = () => {
   return transporter;
 };
 
-const sendMail = async ({ to, subject, text, html }) => {
+const sendMail = async ({ to, subject, text, html, testPayload }) => {
+  // Tests use an in-memory outbox so the full OTP flow is exercised without
+  // sending real email or exposing codes in logs. This path is test-only.
+  if (process.env.NODE_ENV === 'test') {
+    globalThis.__securegateTestOutbox = globalThis.__securegateTestOutbox || [];
+    globalThis.__securegateTestOutbox.push({ to, subject, ...testPayload, createdAt: new Date() });
+    return { messageId: `test-${globalThis.__securegateTestOutbox.length}` };
+  }
+
   const from = process.env.EMAIL_FROM || process.env.SMTP_USER;
   if (!from) throw new Error('EMAIL_FROM or SMTP_USER must be configured.');
   return getTransporter().sendMail({ from, to, subject, text, html });
@@ -50,6 +58,7 @@ export const sendLoginOtpEmail = async ({ to, firstName, code, expiresInMinutes 
     to,
     subject: 'Your SecureGate sign-in verification code',
     text: `Hello ${firstName || 'there'}, your SecureGate verification code is ${code}. It expires in ${expiresInMinutes} minutes. Do not share this code with anyone.`,
+    testPayload: { purpose: 'LOGIN_OTP', code },
     html: `<div style="font-family:Arial,sans-serif;max-width:520px;margin:auto;color:#172033"><h2>SecureGate sign-in verification</h2><p>Hello ${safeName},</p><p>Use this one-time verification code to finish signing in:</p><div style="font-size:30px;font-weight:700;letter-spacing:8px;padding:18px;background:#f3f4f6;text-align:center;border-radius:10px">${code}</div><p>This code expires in ${expiresInMinutes} minutes and can only be used once.</p><p>Never share this code. SecureGate support will never ask you for it.</p></div>`,
   });
 };
@@ -61,6 +70,7 @@ export const sendEmployeeInvitationEmail = async ({ to, firstName, invitationUrl
     to,
     subject: 'You have been invited to SecureGate',
     text: `Hello ${firstName || 'there'}, you have been invited to join SecureGate. Set your password using this one-time link: ${invitationUrl} . The invitation expires in ${expiresInHours} hours.`,
+    testPayload: { purpose: 'INVITATION', invitationUrl },
     html: `<div style="font-family:Arial,sans-serif;max-width:520px;margin:auto;color:#172033"><h2>Welcome to SecureGate</h2><p>Hello ${safeName},</p><p>Your organization has created an account for you. Use the secure invitation link below to verify your email and set your own password.</p><p><a href="${safeUrl}" style="display:inline-block;padding:12px 20px;background:#6d4aff;color:#fff;text-decoration:none;border-radius:8px">Accept invitation</a></p><p>This link expires in ${expiresInHours} hours and can only be used once.</p><p>If you were not expecting this invitation, you can ignore this email.</p></div>`,
   });
 };
