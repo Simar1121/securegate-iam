@@ -8,6 +8,7 @@ import Invitation from '../models/Invitation.js';
 import { sendLoginOtpEmail } from '../services/emailService.js';
 import Device from '../models/Device.js';
 import { assessLoginRisk } from '../services/riskEngine.js';
+import { synchronizeAdminSeats, hasAdminSeat } from '../services/adminSeatService.js';
 
 
 const MAX_FAILED_ATTEMPTS = 5;
@@ -317,6 +318,26 @@ export const login = async (req, res) => {
         success: false,
         message: `Invalid email or password credentials. (${remainingAttempts} attempt(s) remaining before lockout).`,
       });
+    }
+
+    // Reconcile pre-existing administrator records without deleting or
+    // demoting them. Accounts beyond the fixed seat inventory cannot sign in
+    // with administrator privileges until an owner reviews their assignment.
+    if (['Super Admin', 'IT Administrator'].includes(user.role.name)) {
+      await synchronizeAdminSeats();
+      if (!await hasAdminSeat(user.role.name, user._id)) {
+        await logAudit({
+          req, action: 'ADMIN_SEAT_ACCESS_DENIED', category: 'SECURITY',
+          actor: user._id, actorEmail: user.email, actorName: user.fullName,
+          actorRole: user.role.name, targetType: 'Auth', targetName: user.email,
+          status: 'WARNING',
+          details: { reason: 'No administrator seat is assigned to this account.' },
+        });
+        return res.status(403).json({
+          success: false,
+          message: 'This administrator account does not hold an available organization administrator seat. Contact the Super Admin.',
+        });
+      }
     }
 
     // Password verification is only the first factor. No access JWT is
@@ -655,6 +676,13 @@ export const verifyLoginOtp = async (req, res) => {
     }
     if (user.lockUntil && user.lockUntil > now) {
       return res.status(423).json({ success: false, message: 'This account is temporarily locked. Try again after the lockout period.' });
+    }
+    if (['Super Admin', 'IT Administrator'].includes(user.role.name) &&
+        !await hasAdminSeat(user.role.name, user._id)) {
+      return res.status(403).json({
+        success: false,
+        message: 'This administrator account no longer holds an organization administrator seat. Contact the Super Admin.',
+      });
     }
 
     const deviceId = req.body?.deviceId;
