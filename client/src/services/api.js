@@ -11,9 +11,9 @@ const api = axios.create({
 api.interceptors.request.use(
   (config) => {
     const token = localStorage.getItem('securegate_token');
-    if (token) {
-      config.headers.Authorization = `Bearer ${token}`;
-    }
+    const deviceId = localStorage.getItem('securegate_device_id');
+    if (token) config.headers.Authorization = `Bearer ${token}`;
+    if (deviceId) config.headers['X-SecureGate-Device'] = deviceId;
     return config;
   },
   (error) => Promise.reject(error)
