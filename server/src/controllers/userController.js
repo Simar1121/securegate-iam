@@ -342,8 +342,8 @@ export const createUser = async (req, res) => {
 
     return res.status(201).json({
       success: true,
-      message: 'Invitation sent to ' + createdUser.email +
-        '. The employee must accept it and set their own password within 24 hours.',
+      message: 'Gmail SMTP accepted the invitation email for ' + createdUser.email +
+        '. The employee must accept it and set their own password within 24 hours. Check Inbox, Spam and All Mail if it is not visible.',
       data: createdUser,
     });
   } catch (error) {
@@ -429,7 +429,7 @@ export const resendInvitation = async (req, res) => {
       details: { email: user.email, invitationExpiresAt: expiresAt },
     });
 
-    return res.json({ success: true, message: `A new 24-hour invitation was sent to ${user.email}.` });
+    return res.json({ success: true, message: `Gmail SMTP accepted a new 24-hour invitation email for ${user.email}. Check Inbox, Spam and All Mail if it is not visible.` });
   } catch (error) {
     console.error('[Resend Invitation Error]:', error.message);
     return res.status(500).json({ success: false, message: 'Unable to resend this invitation.' });
