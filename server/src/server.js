@@ -95,6 +95,9 @@ const authLimiter = rateLimit({
 
 app.use('/api', generalApiLimiter);
 app.use('/api/auth/login', authLimiter);
+app.use('/api/auth/login/verify-otp', authLimiter);
+app.use('/api/auth/login/resend-otp', authLimiter);
+app.use('/api/auth/invitations/accept', authLimiter);
 app.use('/api/auth/register', authLimiter);
 
 // 4. Request Body Parsers with Safe Size Limits (DoS / Memory exhaustion protection)
