@@ -228,19 +228,26 @@ export const register = async (_req, res) => {
 // @access  Public
 export const login = async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const { email, identifier, password } = req.body || {};
+    const loginIdentifier = String(identifier || email || '').trim();
 
-    if (!email || !password) {
+    if (!loginIdentifier || !password) {
       return res.status(400).json({
         success: false,
-        message: 'Please provide both email and password.',
+        message: 'Please provide your registered email or employee ID and password.',
       });
     }
 
-    const normalizedEmail = email.toLowerCase().trim();
+    const normalizedIdentifier = loginIdentifier.toLowerCase();
+    const identityQuery = {
+      $or: [
+        { email: normalizedIdentifier },
+        { employeeId: loginIdentifier.toUpperCase() },
+      ],
+    };
 
-    // Find user including password
-    const user = await User.findOne({ email: normalizedEmail })
+    // Find user including password. Email and employee ID are both supported.
+    const user = await User.findOne(identityQuery)
       .select('+password')
       .populate({
         path: 'role',
@@ -253,7 +260,7 @@ export const login = async (req, res) => {
         action: 'LOGIN_FAILED',
         category: 'AUTH',
         actor: null,
-        actorEmail: normalizedEmail,
+        actorEmail: normalizedIdentifier,
         actorName: 'Anonymous / Unknown',
         actorRole: 'None',
         targetType: 'Auth',
