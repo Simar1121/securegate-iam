@@ -20,7 +20,7 @@ const permissions = [
 const roleDefinitions = [
   { name: 'Super Admin', description: 'Full system access, IAM governance, and security controls.', codes: permissions.map(p => p.code), isDefault: false, isCustom: false },
   { name: 'IT Administrator', description: 'Manages employee onboarding, identity lifecycle, roles, permissions, settings, and audit logs.', codes: ['users:read', 'users:create', 'users:update', 'roles:manage', 'permissions:manage', 'settings:manage', 'audit:read'], isDefault: false, isCustom: false },
-  { name: 'HR Manager', description: 'Manages employee directory and employee onboarding.', codes: ['users:read', 'users:create', 'users:update', 'audit:read'], isDefault: false, isCustom: false },
+  { name: 'HR Manager', description: 'Manages employee directory and staff records; employee invitations are restricted to organization administrators.', codes: ['users:read', 'users:update', 'audit:read'], isDefault: false, isCustom: false },
   { name: 'Employee', description: 'Standard employee with self-service access.', codes: [], isDefault: true, isCustom: false },
   { name: 'Security Auditor', description: 'Read-only access to employee records and audit trails.', codes: ['users:read', 'audit:read'], isDefault: false, isCustom: true },
 ];
