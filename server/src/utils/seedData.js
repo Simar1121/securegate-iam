@@ -122,6 +122,7 @@ export const seedDatabase = async () => {
       description: 'Manages system identity, directory services, custom roles, and security audit logs.',
       permissions: [
         permMap['users:read'],
+        permMap['users:create'],
         permMap['users:update'],
         permMap['roles:manage'],
         permMap['permissions:manage'],
