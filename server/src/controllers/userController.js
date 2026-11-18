@@ -1,13 +1,17 @@
+import crypto from 'crypto';
 import User from '../models/User.js';
+import Invitation from '../models/Invitation.js';
+import { sendEmployeeInvitationEmail } from '../services/emailService.js';
+import { reserveAdminSeat, releaseAdminSeat } from '../services/adminSeatService.js';
 import Role from '../models/Role.js';
 import { logAudit } from '../services/auditService.js';
 import {
   isValidObjectId,
   validatePasswordStrength,
-  generateSecureTemporaryPassword,
 } from '../utils/security.js';
 
 const PRIVILEGED_ROLES = ['Super Admin', 'IT Administrator'];
+const sha256 = (value) => crypto.createHash('sha256').update(value).digest('hex');
 const PRIVILEGED_PERMISSION_CODES = [
   'roles:manage',
   'permissions:manage',
@@ -158,19 +162,22 @@ export const getUserById = async (req, res) => {
 // @route   POST /api/users
 // @access  Private (Permission: users:create)
 export const createUser = async (req, res) => {
+  let createdUser;
+  let invitation;
+  let reservedAdminSeat = false;
+
   try {
+    const callerRole = req.user.role?.name;
+    if (!['Super Admin', 'IT Administrator'].includes(callerRole)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Only the Super Admin and IT Administrators may create employee accounts.',
+      });
+    }
+
     const {
-      firstName,
-      lastName,
-      email,
-      password,
-      roleId,
-      department,
-      jobTitle,
-      phone,
-      location,
-      status,
-    } = req.body;
+      firstName, lastName, email, roleId, department, jobTitle, phone, location, status,
+    } = req.body || {};
 
     if (!firstName || !lastName || !email || !roleId) {
       return res.status(400).json({
@@ -178,146 +185,144 @@ export const createUser = async (req, res) => {
         message: 'Please provide required fields: firstName, lastName, email, and roleId.',
       });
     }
-
     if (!isValidObjectId(roleId)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid role ID format.',
-      });
+      return res.status(400).json({ success: false, message: 'Invalid role ID format.' });
     }
 
-    const emailNormalized = email.toLowerCase().trim();
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(emailNormalized)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Please enter a valid corporate email address.',
-      });
+    const emailNormalized = String(email).toLowerCase().trim();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailNormalized)) {
+      return res.status(400).json({ success: false, message: 'Please enter a valid email address.' });
     }
-
-    const existing = await User.findOne({ email: emailNormalized });
-    if (existing) {
-      return res.status(400).json({
-        success: false,
-        message: 'A user with this email address already exists.',
-      });
+    if (await User.findOne({ email: emailNormalized })) {
+      return res.status(409).json({ success: false, message: 'A user with this email address already exists.' });
     }
 
     const roleDoc = await Role.findById(roleId).populate('permissions');
-    if (!roleDoc) {
-      return res.status(400).json({
-        success: false,
-        message: 'Selected role does not exist in the system.',
-      });
+    if (!roleDoc || roleDoc.status !== 'Active') {
+      return res.status(400).json({ success: false, message: 'Selected role does not exist or is inactive.' });
     }
 
-    // Role Status Validation: Inactive roles cannot be assigned
-    if (roleDoc.status === 'Inactive') {
-      return res.status(400).json({
-        success: false,
-        message: `Cannot assign role "${roleDoc.name}" because it is currently inactive.`,
-      });
-    }
-
-    // PRIVILEGE ESCALATION PREVENTION:
-    // Non-Super-Admins may only assign roles whose permissions are a subset of their own.
-    const callerRole = req.user.role?.name;
-    if (!mayAssignRole(req.user, roleDoc)) {
-      await logAudit({
-        req,
-        action: 'PRIVILEGE_ESCALATION_BLOCKED',
-        category: 'SECURITY',
-        actor: req.user._id,
-        actorEmail: req.user.email,
-        actorName: req.user.fullName,
-        actorRole: callerRole,
-        targetType: 'User',
-        targetName: emailNormalized,
-        status: 'WARNING',
-        details: {
-          attemptedRole: roleDoc.name,
-          reason: 'Requested role contains privileges the actor is not authorized to assign',
-        },
-      });
-
+    if (roleDoc.name === 'Super Admin') {
       return res.status(403).json({
         success: false,
-        message: 'Privilege Escalation Blocked: You can only assign roles with permissions you already possess. Privileged roles require a Super Administrator.',
+        message: 'The organization has exactly one Super Admin. The initial account is created only during organization setup.',
+      });
+    }
+    if (roleDoc.name === 'IT Administrator' && callerRole !== 'Super Admin') {
+      await logAudit({
+        req, action: 'PRIVILEGE_ESCALATION_BLOCKED', category: 'SECURITY',
+        actor: req.user._id, actorEmail: req.user.email, actorName: req.user.fullName,
+        actorRole: callerRole, targetType: 'User', targetName: emailNormalized,
+        status: 'WARNING', details: { attemptedRole: roleDoc.name, reason: 'Only the Super Admin may appoint IT Administrators.' },
+      });
+      return res.status(403).json({ success: false, message: 'Only the Super Admin can appoint IT Administrators.' });
+    }
+
+    if (!mayAssignRole(req.user, roleDoc)) {
+      await logAudit({
+        req, action: 'PRIVILEGE_ESCALATION_BLOCKED', category: 'SECURITY',
+        actor: req.user._id, actorEmail: req.user.email, actorName: req.user.fullName,
+        actorRole: callerRole, targetType: 'User', targetName: emailNormalized,
+        status: 'WARNING',
+        details: { attemptedRole: roleDoc.name, reason: 'Requested role contains privileges the actor is not authorized to assign' },
+      });
+      return res.status(403).json({
+        success: false,
+        message: 'You may assign only roles whose permissions are within your own authority. Privileged roles require the Super Admin.',
       });
     }
 
-    // Password Security: Avoid shared default passwords
-    let initialPassword;
-    let mustChangePassword = false;
-
-    if (password && password.trim().length > 0) {
-      const pwdCheck = validatePasswordStrength(password);
-      if (!pwdCheck.valid) {
-        return res.status(400).json({
-          success: false,
-          message: pwdCheck.message,
-        });
-      }
-      initialPassword = password;
-    } else {
-      // Generate a cryptographically secure, unique temporary password
-      initialPassword = generateSecureTemporaryPassword();
-      mustChangePassword = true;
+    const frontendUrl = process.env.FRONTEND_URL || process.env.CLIENT_URL;
+    if (!frontendUrl || !/^https?:\/\//i.test(frontendUrl)) {
+      return res.status(503).json({ success: false, message: 'Invitation email delivery is not configured. Set FRONTEND_URL or CLIENT_URL.' });
     }
 
-    const newUser = new User({
-      firstName: firstName.trim().slice(0, 50),
-      lastName: lastName.trim().slice(0, 50),
+    const invitationToken = crypto.randomBytes(32).toString('hex');
+    createdUser = new User({
+      firstName: String(firstName).trim().slice(0, 50),
+      lastName: String(lastName).trim().slice(0, 50),
       email: emailNormalized,
-      password: initialPassword,
+      invitationPending: true,
+      emailVerifiedAt: null,
       role: roleDoc._id,
       department: department?.trim().slice(0, 50) || 'Engineering',
       jobTitle: jobTitle?.trim().slice(0, 50) || 'Team Member',
       phone: phone?.trim().slice(0, 30) || '',
       location: location?.trim().slice(0, 50) || 'Headquarters',
       status: ['Active', 'Suspended', 'Deactivated'].includes(status) ? status : 'Active',
-      mustChangePassword,
+      mustChangePassword: false,
       tokenVersion: 0,
     });
 
-    await newUser.save();
-    await newUser.populate('role');
+    if (roleDoc.name === 'IT Administrator') {
+      await reserveAdminSeat('IT Administrator', createdUser._id);
+      reservedAdminSeat = true;
+    }
 
-    // Audit log
+    await createdUser.save();
+    await createdUser.populate('role');
+
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    invitation = await Invitation.create({
+      userId: createdUser._id,
+      invitedBy: req.user._id,
+      tokenHash: sha256(invitationToken),
+      expiresAt,
+    });
+
+    const invitationUrl = `${frontendUrl.replace(/\/$/, '')}/accept-invitation?token=${encodeURIComponent(invitationToken)}`;
+    try {
+      await sendEmployeeInvitationEmail({
+        to: createdUser.email,
+        firstName: createdUser.firstName,
+        invitationUrl,
+        expiresInHours: 24,
+      });
+    } catch (mailError) {
+      await Invitation.deleteOne({ _id: invitation._id });
+      await User.deleteOne({ _id: createdUser._id });
+      if (reservedAdminSeat) await releaseAdminSeat(createdUser._id);
+      return res.status(503).json({
+        success: false,
+        message: 'The employee record was not retained because Gmail could not deliver the invitation. Check SMTP configuration and try again.',
+      });
+    }
+
     await logAudit({
       req,
-      action: 'USER_CREATED',
+      action: 'USER_INVITED',
       category: 'USER_MGMT',
       actor: req.user._id,
       actorEmail: req.user.email,
       actorName: req.user.fullName,
       actorRole: callerRole,
       targetType: 'User',
-      targetId: newUser._id,
-      targetName: newUser.fullName,
+      targetId: createdUser._id,
+      targetName: createdUser.fullName,
       status: 'SUCCESS',
       details: {
-        email: newUser.email,
+        email: createdUser.email,
         role: roleDoc.name,
-        department: newUser.department,
-        employeeId: newUser.employeeId,
-        mustChangePassword,
+        department: createdUser.department,
+        employeeId: createdUser.employeeId,
+        invitationExpiresAt: expiresAt,
       },
     });
 
-    res.status(201).json({
+    return res.status(201).json({
       success: true,
-      message: `Employee ${newUser.fullName} created successfully.`,
-      data: newUser,
-      // Provide the temporary password in response only if auto-generated so the admin can deliver it securely
-      ...(mustChangePassword ? { temporaryPassword: initialPassword } : {}),
+      message: `Invitation sent to ${createdUser.email}. The employee must accept it and set their own password within 24 hours.`,
+      data: createdUser,
     });
   } catch (error) {
-    console.error('[CreateUser Error]:', error);
-    res.status(500).json({
-      success: false,
-      message: error.message || 'Error creating new employee.',
-    });
+    if (invitation?._id) await Invitation.deleteOne({ _id: invitation._id }).catch(() => {});
+    if (createdUser?._id) await User.deleteOne({ _id: createdUser._id }).catch(() => {});
+    if (reservedAdminSeat && createdUser?._id) await releaseAdminSeat(createdUser._id).catch(() => {});
+    if (error.code === 11000 || /capacity/.test(error.message || '')) {
+      return res.status(409).json({ success: false, message: error.message || 'The administrator seat is already occupied.' });
+    }
+    console.error('[CreateUser Error]:', error.message);
+    return res.status(500).json({ success: false, message: 'Unable to create and invite this employee.' });
   }
 };
 
