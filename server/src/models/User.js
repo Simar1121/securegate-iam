@@ -29,10 +29,12 @@ const userSchema = new mongoose.Schema(
     },
     password: {
       type: String,
-      required: [true, 'Password is required'],
+      required: function passwordRequired() { return !this.invitationPending; },
       minlength: [6, 'Password must be at least 6 characters long'],
       select: false, // Never return password hash by default
     },
+    invitationPending: { type: Boolean, default: false, index: true },
+    emailVerifiedAt: { type: Date, default: null },
     employeeId: {
       type: String,
       unique: true,
@@ -123,7 +125,7 @@ userSchema.pre('save', async function (next) {
     this.employeeId = `SEC-${randomNum}`;
   }
 
-  if (!this.isModified('password')) {
+  if (!this.isModified('password') || !this.password) {
     return next();
   }
 
