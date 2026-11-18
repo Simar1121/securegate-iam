@@ -2,6 +2,9 @@ import express from 'express';
 import {
   register,
   login,
+  verifyLoginOtp,
+  resendLoginOtp,
+  acceptInvitation,
   logout,
   getMe,
   changePassword,
@@ -13,6 +16,9 @@ const router = express.Router();
 
 router.post('/register', register);
 router.post('/login', login);
+router.post('/login/verify-otp', verifyLoginOtp);
+router.post('/login/resend-otp', resendLoginOtp);
+router.post('/invitations/accept', acceptInvitation);
 router.post('/logout', protect, logout);
 router.get('/me', protect, getMe);
 router.put('/change-password', protect, changePassword);
