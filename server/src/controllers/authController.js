@@ -1,6 +1,5 @@
 import crypto from 'crypto';
 import User from '../models/User.js';
-import Role from '../models/Role.js';
 import RevokedToken from '../models/RevokedToken.js';
 import { logAudit } from '../services/auditService.js';
 import { validatePasswordStrength } from '../utils/security.js';
@@ -107,122 +106,10 @@ const deliverLoginChallenge = async (user, req, res) => {
 // @route   POST /api/auth/register
 // @access  Public
 export const register = async (_req, res) => {
-  return res.status(403).json({ success: false, message: 'Public self-registration is disabled. Contact an organization administrator.' });
-  /* Legacy implementation retained temporarily for reference; unreachable. */
-  try {
-    const { firstName, lastName, email, password, department, jobTitle } = req.body;
-
-    if (!firstName || !lastName || !email || !password) {
-      return res.status(400).json({
-        success: false,
-        message: 'Please provide all required fields: first name, last name, email, and password.',
-      });
-    }
-
-    const emailNormalized = email.toLowerCase().trim();
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(emailNormalized)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Please provide a valid corporate email address.',
-      });
-    }
-
-    // Password strength check
-    const pwdCheck = validatePasswordStrength(password);
-    if (!pwdCheck.valid) {
-      return res.status(400).json({
-        success: false,
-        message: pwdCheck.message,
-      });
-    }
-
-    const existingUser = await User.findOne({ email: emailNormalized });
-    if (existingUser) {
-      return res.status(400).json({
-        success: false,
-        message: 'A user with this email address already exists.',
-      });
-    }
-
-    // Public self-registration ALWAYS maps strictly to the default Employee role
-    let defaultRole = await Role.findOne({ name: 'Employee', isDefault: true });
-    if (!defaultRole) {
-      defaultRole = await Role.findOne({ isDefault: true }) || await Role.findOne({ name: 'Employee' });
-    }
-
-    if (!defaultRole) {
-      return res.status(500).json({
-        success: false,
-        message: 'Default employee role configuration is missing. Contact system administrator.',
-      });
-    }
-
-    const user = new User({
-      firstName: firstName.trim(),
-      lastName: lastName.trim(),
-      email: emailNormalized,
-      password,
-      department: department?.trim() || 'Engineering',
-      jobTitle: jobTitle?.trim() || 'Software Engineer',
-      role: defaultRole._id,
-      status: 'Active',
-      tokenVersion: 0,
-    });
-
-    await user.save();
-
-    // Populate role
-    await user.populate({
-      path: 'role',
-      populate: { path: 'permissions', model: 'Permission' },
-    });
-
-    const token = user.generateAuthToken(deviceIdHash);
-
-    // Log audit
-    await logAudit({
-      req,
-      action: 'USER_REGISTER',
-      category: 'AUTH',
-      actor: user._id,
-      actorEmail: user.email,
-      actorName: user.fullName,
-      actorRole: user.role?.name || 'Employee',
-      targetType: 'User',
-      targetId: user._id,
-      targetName: user.fullName,
-      status: 'SUCCESS',
-      details: { email: user.email, role: user.role?.name },
-    });
-
-    res.status(201).json({
-      success: true,
-      message: 'Account registered successfully.',
-      token,
-      user: {
-        id: user._id,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        fullName: user.fullName,
-        email: user.email,
-        employeeId: user.employeeId,
-        department: user.department,
-        jobTitle: user.jobTitle,
-        phone: user.phone,
-        location: user.location,
-        bio: user.bio,
-        role: user.role,
-        status: user.status,
-      },
-    });
-  } catch (error) {
-    console.error('[Register Error]:', error);
-    res.status(500).json({
-      success: false,
-      message: error.message || 'Server error during registration.',
-    });
-  }
+  return res.status(403).json({
+    success: false,
+    message: 'Public self-registration is disabled. Contact an organization administrator.',
+  });
 };
 
 // @desc    Authenticate user & get JWT token
