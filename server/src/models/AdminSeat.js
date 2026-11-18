@@ -10,5 +10,6 @@ const adminSeatSchema = new mongoose.Schema({
 
 adminSeatSchema.index({ roleName: 1, seatNumber: 1 }, { unique: true });
 adminSeatSchema.index({ userId: 1 });
+adminSeatSchema.index({ roleName: 1, userId: 1 }, { unique: true, partialFilterExpression: { userId: { $type: 'objectId' } } });
 
 export default mongoose.model('AdminSeat', adminSeatSchema);
