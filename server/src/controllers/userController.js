@@ -330,6 +330,7 @@ export const createUser = async (req, res) => {
 // @route   PUT /api/users/:id
 // @access  Private (Permission: users:update)
 export const updateUser = async (req, res) => {
+  let reservedSeatForPromotion = false;
   try {
     if (!isValidObjectId(req.params.id)) {
       return res.status(400).json({
@@ -514,6 +515,7 @@ export const updateUser = async (req, res) => {
       if (newRole.name === 'IT Administrator' && targetCurrentRole !== 'IT Administrator') {
         try {
           await reserveAdminSeat('IT Administrator', user._id);
+          reservedSeatForPromotion = true;
         } catch (seatError) {
           return res.status(409).json({ success: false, message: seatError.message });
         }
@@ -611,6 +613,7 @@ export const updateUser = async (req, res) => {
     }
 
     await user.save();
+    reservedSeatForPromotion = false;
     if (targetCurrentRole === 'IT Administrator' && changes.role && changes.role.to !== 'IT Administrator') {
       await releaseAdminSeat(user._id);
     }
@@ -641,6 +644,7 @@ export const updateUser = async (req, res) => {
       data: user,
     });
   } catch (error) {
+    if (reservedSeatForPromotion) await releaseAdminSeat(req.params.id).catch(() => {});
     console.error('[UpdateUser Error]:', error);
     res.status(500).json({
       success: false,
