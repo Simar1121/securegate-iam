@@ -136,10 +136,9 @@ export const seedDatabase = async () => {
 
     const hrManagerRole = await Role.create({
       name: 'HR Manager',
-      description: 'Manages employee directory, onboarding new staff, and monitoring staff records.',
+      description: 'Manages employee directory and staff records; employee invitations are restricted to organization administrators.',
       permissions: [
         permMap['users:read'],
-        permMap['users:create'],
         permMap['users:update'],
         permMap['audit:read'],
       ],
