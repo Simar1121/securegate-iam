@@ -326,6 +326,83 @@ export const createUser = async (req, res) => {
   }
 };
 
+export const resendInvitation = async (req, res) => {
+  let invitation;
+  try {
+    if (!isValidObjectId(req.params.id)) {
+      return res.status(400).json({ success: false, message: 'Invalid employee ID format.' });
+    }
+
+    const callerRole = req.user.role?.name;
+    if (!['Super Admin', 'IT Administrator'].includes(callerRole)) {
+      return res.status(403).json({ success: false, message: 'Only administrators may resend employee invitations.' });
+    }
+
+    const user = await User.findById(req.params.id).populate('role');
+    if (!user) return res.status(404).json({ success: false, message: 'Employee record not found.' });
+    if (!user.invitationPending) {
+      return res.status(409).json({ success: false, message: 'This employee has already accepted the invitation.' });
+    }
+    if (user.role?.name === 'IT Administrator' && callerRole !== 'Super Admin') {
+      return res.status(403).json({ success: false, message: 'Only the Super Admin can manage IT Administrator invitations.' });
+    }
+
+    const frontendUrl = process.env.FRONTEND_URL || process.env.CLIENT_URL;
+    if (!frontendUrl || !/^https?:\/\//i.test(frontendUrl)) {
+      return res.status(503).json({ success: false, message: 'Invitation email delivery is not configured.' });
+    }
+
+    const now = new Date();
+    const invitationToken = crypto.randomBytes(32).toString('hex');
+    const expiresAt = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+
+    await Invitation.updateMany(
+      { userId: user._id, acceptedAt: null, revokedAt: null },
+      { $set: { revokedAt: now } }
+    );
+
+    invitation = await Invitation.create({
+      userId: user._id,
+      invitedBy: req.user._id,
+      tokenHash: sha256(invitationToken),
+      expiresAt,
+    });
+
+    const invitationUrl = `${frontendUrl.replace(/\/$/, '')}/accept-invitation?token=${encodeURIComponent(invitationToken)}`;
+    try {
+      await sendEmployeeInvitationEmail({
+        to: user.email,
+        firstName: user.firstName,
+        invitationUrl,
+        expiresInHours: 24,
+      });
+    } catch (mailError) {
+      await Invitation.updateOne({ _id: invitation._id }, { $set: { revokedAt: new Date() } });
+      return res.status(503).json({ success: false, message: 'Unable to deliver the invitation email. Check Gmail SMTP configuration and retry.' });
+    }
+
+    await logAudit({
+      req,
+      action: 'USER_INVITATION_RESENT',
+      category: 'USER_MGMT',
+      actor: req.user._id,
+      actorEmail: req.user.email,
+      actorName: req.user.fullName,
+      actorRole: callerRole,
+      targetType: 'User',
+      targetId: user._id,
+      targetName: user.fullName,
+      status: 'SUCCESS',
+      details: { email: user.email, invitationExpiresAt: expiresAt },
+    });
+
+    return res.json({ success: true, message: `A new 24-hour invitation was sent to ${user.email}.` });
+  } catch (error) {
+    console.error('[Resend Invitation Error]:', error.message);
+    return res.status(500).json({ success: false, message: 'Unable to resend this invitation.' });
+  }
+};
+
 // @desc    Update employee information with privilege escalation prevention
 // @route   PUT /api/users/:id
 // @access  Private (Permission: users:update)
