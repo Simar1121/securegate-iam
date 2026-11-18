@@ -86,7 +86,9 @@ const generalApiLimiter = rateLimit({
 // Strict Auth Route Limiter (Brute-force protection on Login/Register)
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 20, // Max 20 attempts per 15 minutes per IP
+  // Keep production strict. The security test suite deliberately exercises
+  // multiple independent login flows from one test IP in a single run.
+  max: process.env.NODE_ENV === 'test' ? 1000 : 20,
   standardHeaders: true,
   legacyHeaders: false,
   message: {
