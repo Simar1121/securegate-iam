@@ -15,6 +15,7 @@ const LOCKOUT_MINUTES = 15;
 const OTP_TTL_MS = 5 * 60 * 1000;
 const OTP_RESEND_COOLDOWN_MS = 45 * 1000;
 const OTP_MAX_ATTEMPTS = 5;
+const OTP_MAX_RESENDS = 5;
 
 const sha256 = (value) => crypto.createHash('sha256').update(value).digest('hex');
 const hashOtp = (challengeId, code) =>
@@ -773,6 +774,13 @@ export const resendLoginOtp = async (req, res) => {
     if (!challenge) {
       return res.status(400).json({ success: false, message: 'The verification challenge is invalid or expired. Sign in again.' });
     }
+    const resendCount = challenge.resends || 0;
+    if (resendCount >= OTP_MAX_RESENDS) {
+      return res.status(429).json({
+        success: false,
+        message: 'The maximum number of code resends has been reached. Sign in again to start a new verification challenge.',
+      });
+    }
 
     const waitMs = OTP_RESEND_COOLDOWN_MS - (now.getTime() - challenge.lastSentAt.getTime());
     if (waitMs > 0) {
@@ -790,13 +798,21 @@ export const resendLoginOtp = async (req, res) => {
 
     const code = crypto.randomInt(100000, 1000000).toString();
     const updated = await AuthChallenge.updateOne(
-      { _id: challenge._id, consumedAt: null, lastSentAt: challenge.lastSentAt },
-      { $set: {
-        codeHash: hashOtp(challengeId, code),
-        attempts: 0,
-        lastSentAt: now,
-        expiresAt: new Date(now.getTime() + OTP_TTL_MS),
-      } }
+      {
+        _id: challenge._id,
+        consumedAt: null,
+        lastSentAt: challenge.lastSentAt,
+        attempts: challenge.attempts,
+        $or: [{ resends: resendCount }, { resends: { $exists: false } }],
+      },
+      {
+        $set: {
+          codeHash: hashOtp(challengeId, code),
+          lastSentAt: now,
+          expiresAt: new Date(now.getTime() + OTP_TTL_MS),
+        },
+        $inc: { resends: 1 },
+      }
     );
     if (!updated.modifiedCount) {
       return res.status(409).json({ success: false, message: 'The verification challenge changed. Request a new sign-in.' });
@@ -816,6 +832,7 @@ export const resendLoginOtp = async (req, res) => {
       maskedEmail: maskEmail(user.email),
       expiresInSeconds: 300,
       resendAfterSeconds: 45,
+      resendsRemaining: Math.max(0, OTP_MAX_RESENDS - resendCount - 1),
     });
   } catch (error) {
     console.error('[Resend Login OTP Error]:', error.message);
