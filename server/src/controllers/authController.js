@@ -4,9 +4,102 @@ import Role from '../models/Role.js';
 import RevokedToken from '../models/RevokedToken.js';
 import { logAudit } from '../services/auditService.js';
 import { validatePasswordStrength } from '../utils/security.js';
+import AuthChallenge from '../models/AuthChallenge.js';
+import Invitation from '../models/Invitation.js';
+import { sendLoginOtpEmail } from '../services/emailService.js';
+
 
 const MAX_FAILED_ATTEMPTS = 5;
 const LOCKOUT_MINUTES = 15;
+const OTP_TTL_MS = 5 * 60 * 1000;
+const OTP_RESEND_COOLDOWN_MS = 45 * 1000;
+const OTP_MAX_ATTEMPTS = 5;
+
+const sha256 = (value) => crypto.createHash('sha256').update(value).digest('hex');
+const hashOtp = (challengeId, code) =>
+  crypto.createHmac('sha256', process.env.JWT_SECRET)
+    .update(`${challengeId}:${code}`)
+    .digest('hex');
+
+const maskEmail = (email) => {
+  const [local, domain] = String(email || '').split('@');
+  if (!local || !domain) return 'your registered email';
+  return `${local.slice(0, 2)}${'*'.repeat(Math.max(2, local.length - 2))}@${domain}`;
+};
+
+const serializeAuthenticatedUser = (user) => ({
+  id: user._id,
+  firstName: user.firstName,
+  lastName: user.lastName,
+  fullName: user.fullName,
+  email: user.email,
+  employeeId: user.employeeId,
+  department: user.department,
+  jobTitle: user.jobTitle,
+  phone: user.phone,
+  location: user.location,
+  bio: user.bio,
+  role: user.role,
+  status: user.status,
+  lastLogin: user.lastLogin,
+  mustChangePassword: user.mustChangePassword,
+});
+
+const deliverLoginChallenge = async (user, req, res) => {
+  const now = new Date();
+  await AuthChallenge.updateMany(
+    { userId: user._id, purpose: 'LOGIN_OTP', consumedAt: null },
+    { $set: { consumedAt: now } }
+  );
+
+  const challengeId = crypto.randomBytes(32).toString('hex');
+  const code = crypto.randomInt(100000, 1000000).toString();
+  const challenge = await AuthChallenge.create({
+    userId: user._id,
+    challengeIdHash: sha256(challengeId),
+    codeHash: hashOtp(challengeId, code),
+    purpose: 'LOGIN_OTP',
+    attempts: 0,
+    lastSentAt: now,
+    expiresAt: new Date(now.getTime() + OTP_TTL_MS),
+  });
+
+  try {
+    await sendLoginOtpEmail({ to: user.email, firstName: user.firstName, code, expiresInMinutes: 5 });
+  } catch (error) {
+    await AuthChallenge.updateOne({ _id: challenge._id }, { $set: { consumedAt: new Date() } });
+    console.error('[Login OTP Email Error]:', error.message);
+    return res.status(503).json({
+      success: false,
+      message: 'Unable to deliver the sign-in verification email. Contact your administrator or try again later.',
+    });
+  }
+
+  await logAudit({
+    req,
+    action: 'LOGIN_OTP_SENT',
+    category: 'AUTH',
+    actor: user._id,
+    actorEmail: user.email,
+    actorName: user.fullName,
+    actorRole: user.role?.name || 'User',
+    targetType: 'Auth',
+    targetName: user.email,
+    status: 'SUCCESS',
+    details: { method: 'EMAIL', expiresInSeconds: 300 },
+  });
+
+  return res.status(200).json({
+    success: true,
+    requiresOtp: true,
+    message: 'A verification code has been sent to your registered email address.',
+    challengeId,
+    maskedEmail: maskEmail(user.email),
+    expiresInSeconds: 300,
+    resendAfterSeconds: 45,
+  });
+};
+
 
 // @desc    Register a new user / employee
 // @route   POST /api/auth/register
@@ -322,54 +415,9 @@ export const login = async (req, res) => {
       });
     }
 
-    // 4. Successful login: reset brute-force counters
-    user.failedLoginAttempts = 0;
-    user.lockUntil = null;
-    user.lastLogin = new Date();
-    await user.save();
-
-    const token = user.generateAuthToken();
-
-    // Log successful login
-    await logAudit({
-      req,
-      action: 'LOGIN_SUCCESS',
-      category: 'AUTH',
-      actor: user._id,
-      actorEmail: user.email,
-      actorName: user.fullName,
-      actorRole: user.role?.name || 'User',
-      targetType: 'Auth',
-      targetName: user.email,
-      status: 'SUCCESS',
-      details: {
-        role: user.role?.name,
-        employeeId: user.employeeId,
-      },
-    });
-
-    res.json({
-      success: true,
-      message: 'Login successful.',
-      token,
-      user: {
-        id: user._id,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        fullName: user.fullName,
-        email: user.email,
-        employeeId: user.employeeId,
-        department: user.department,
-        jobTitle: user.jobTitle,
-        phone: user.phone,
-        location: user.location,
-        bio: user.bio,
-        role: user.role,
-        status: user.status,
-        lastLogin: user.lastLogin,
-        mustChangePassword: user.mustChangePassword,
-      },
-    });
+    // Password verification is only the first factor. No access JWT is
+    // issued and lastLogin is not updated until the email OTP is verified.
+    return await deliverLoginChallenge(user, req, res);
   } catch (error) {
     console.error('[Login Error]:', error);
     res.status(500).json({
@@ -627,5 +675,236 @@ export const updateProfile = async (req, res) => {
       success: false,
       message: 'Server error updating profile.',
     });
+  }
+};
+
+ 
+// @desc    Verify the email OTP and issue the authenticated session
+// @route   POST /api/auth/login/verify-otp
+// @access  Public (challenge-bound)
+export const verifyLoginOtp = async (req, res) => {
+  try {
+    const { challengeId, code } = req.body || {};
+    if (typeof challengeId !== 'string' || !/^[a-f0-9]{64}$/i.test(challengeId) ||
+        typeof code !== 'string' || !/^\d{6}$/.test(code)) {
+      return res.status(400).json({ success: false, message: 'Enter the six-digit verification code.' });
+    }
+
+    const now = new Date();
+    const challengeIdHash = sha256(challengeId);
+    const challenge = await AuthChallenge.findOne({
+      challengeIdHash,
+      purpose: 'LOGIN_OTP',
+      consumedAt: null,
+      expiresAt: { $gt: now },
+    });
+
+    if (!challenge) {
+      return res.status(400).json({ success: false, message: 'The verification challenge is invalid or has expired. Sign in again.' });
+    }
+    if (challenge.attempts >= OTP_MAX_ATTEMPTS) {
+      return res.status(429).json({ success: false, message: 'Too many incorrect verification codes. Sign in again to request a new code.' });
+    }
+
+    const expected = Buffer.from(challenge.codeHash, 'hex');
+    const supplied = Buffer.from(hashOtp(challengeId, code), 'hex');
+    const matches = expected.length === supplied.length && crypto.timingSafeEqual(expected, supplied);
+
+    if (!matches) {
+      const nextAttempts = challenge.attempts + 1;
+      const update = { $inc: { attempts: 1 } };
+      if (nextAttempts >= OTP_MAX_ATTEMPTS) update.$set = { consumedAt: now };
+      await AuthChallenge.updateOne(
+        { _id: challenge._id, consumedAt: null, attempts: challenge.attempts },
+        update
+      );
+      await logAudit({
+        req, action: 'LOGIN_OTP_FAILED', category: 'SECURITY',
+        actor: challenge.userId, actorEmail: 'unknown', actorName: 'Authentication challenge',
+        actorRole: 'Unknown', targetType: 'Auth', status: 'FAILED',
+        details: { attemptCount: nextAttempts, maxAttempts: OTP_MAX_ATTEMPTS },
+      });
+      return res.status(nextAttempts >= OTP_MAX_ATTEMPTS ? 429 : 401).json({
+        success: false,
+        message: nextAttempts >= OTP_MAX_ATTEMPTS
+          ? 'Too many incorrect verification codes. Sign in again to request a new code.'
+          : `Incorrect verification code. ${OTP_MAX_ATTEMPTS - nextAttempts} attempt(s) remaining.`,
+      });
+    }
+
+    // Atomic consume ensures a correct OTP can only produce one session.
+    const consumed = await AuthChallenge.findOneAndUpdate(
+      { _id: challenge._id, codeHash: challenge.codeHash, consumedAt: null, expiresAt: { $gt: now }, attempts: { $lt: OTP_MAX_ATTEMPTS } },
+      { $set: { consumedAt: now } },
+      { new: true }
+    );
+    if (!consumed) {
+      return res.status(409).json({ success: false, message: 'This verification code has already been used. Sign in again.' });
+    }
+
+    const user = await User.findById(consumed.userId).populate({
+      path: 'role',
+      populate: { path: 'permissions', model: 'Permission' },
+    });
+    if (!user || user.invitationPending || user.status !== 'Active' || !user.role || user.role.status !== 'Active') {
+      return res.status(403).json({ success: false, message: 'This account is not currently permitted to sign in.' });
+    }
+    if (user.lockUntil && user.lockUntil > now) {
+      return res.status(423).json({ success: false, message: 'This account is temporarily locked. Try again after the lockout period.' });
+    }
+
+    user.failedLoginAttempts = 0;
+    user.lockUntil = null;
+    user.lastLogin = now;
+    if (!user.emailVerifiedAt) user.emailVerifiedAt = now;
+    await user.save();
+
+    const token = user.generateAuthToken();
+    await logAudit({
+      req,
+      action: 'LOGIN_SUCCESS',
+      category: 'AUTH',
+      actor: user._id,
+      actorEmail: user.email,
+      actorName: user.fullName,
+      actorRole: user.role?.name || 'User',
+      targetType: 'Auth',
+      targetName: user.email,
+      status: 'SUCCESS',
+      details: { role: user.role?.name, employeeId: user.employeeId, mfa: 'EMAIL_OTP' },
+    });
+
+    return res.json({
+      success: true,
+      message: 'Multi-factor authentication successful.',
+      token,
+      user: serializeAuthenticatedUser(user),
+    });
+  } catch (error) {
+    console.error('[Verify Login OTP Error]:', error.message);
+    return res.status(500).json({ success: false, message: 'Unable to verify the sign-in code.' });
+  }
+};
+
+// @desc    Resend the current sign-in OTP
+// @route   POST /api/auth/login/resend-otp
+// @access  Public (challenge-bound)
+export const resendLoginOtp = async (req, res) => {
+  try {
+    const { challengeId } = req.body || {};
+    if (typeof challengeId !== 'string' || !/^[a-f0-9]{64}$/i.test(challengeId)) {
+      return res.status(400).json({ success: false, message: 'Invalid verification challenge. Sign in again.' });
+    }
+
+    const now = new Date();
+    const challenge = await AuthChallenge.findOne({
+      challengeIdHash: sha256(challengeId), purpose: 'LOGIN_OTP',
+      consumedAt: null, expiresAt: { $gt: now }, attempts: { $lt: OTP_MAX_ATTEMPTS },
+    });
+    if (!challenge) {
+      return res.status(400).json({ success: false, message: 'The verification challenge is invalid or expired. Sign in again.' });
+    }
+
+    const waitMs = OTP_RESEND_COOLDOWN_MS - (now.getTime() - challenge.lastSentAt.getTime());
+    if (waitMs > 0) {
+      return res.status(429).json({
+        success: false,
+        message: 'Please wait before requesting another code.',
+        retryAfterSeconds: Math.ceil(waitMs / 1000),
+      });
+    }
+
+    const user = await User.findById(challenge.userId);
+    if (!user || user.status !== 'Active' || user.invitationPending) {
+      return res.status(403).json({ success: false, message: 'This account is not currently permitted to sign in.' });
+    }
+
+    const code = crypto.randomInt(100000, 1000000).toString();
+    const updated = await AuthChallenge.updateOne(
+      { _id: challenge._id, consumedAt: null, lastSentAt: challenge.lastSentAt },
+      { $set: {
+        codeHash: hashOtp(challengeId, code),
+        attempts: 0,
+        lastSentAt: now,
+        expiresAt: new Date(now.getTime() + OTP_TTL_MS),
+      } }
+    );
+    if (!updated.modifiedCount) {
+      return res.status(409).json({ success: false, message: 'The verification challenge changed. Request a new sign-in.' });
+    }
+
+    try {
+      await sendLoginOtpEmail({ to: user.email, firstName: user.firstName, code, expiresInMinutes: 5 });
+    } catch (error) {
+      await AuthChallenge.updateOne({ _id: challenge._id }, { $set: { consumedAt: new Date() } });
+      console.error('[Resend Login OTP Email Error]:', error.message);
+      return res.status(503).json({ success: false, message: 'Unable to deliver the verification email. Sign in again later.' });
+    }
+
+    return res.json({
+      success: true,
+      message: 'A new verification code has been sent.',
+      maskedEmail: maskEmail(user.email),
+      expiresInSeconds: 300,
+      resendAfterSeconds: 45,
+    });
+  } catch (error) {
+    console.error('[Resend Login OTP Error]:', error.message);
+    return res.status(500).json({ success: false, message: 'Unable to resend the verification code.' });
+  }
+};
+
+// @desc    Accept an employee invitation, verify email and set an initial password
+// @route   POST /api/auth/invitations/accept
+// @access  Public (one-time invitation token)
+export const acceptInvitation = async (req, res) => {
+  try {
+    const { token, password, confirmPassword } = req.body || {};
+    if (typeof token !== 'string' || !/^[a-f0-9]{64}$/i.test(token)) {
+      return res.status(400).json({ success: false, message: 'Invalid or expired invitation link.' });
+    }
+    if (typeof password !== 'string' || typeof confirmPassword !== 'string' || password !== confirmPassword) {
+      return res.status(400).json({ success: false, message: 'Enter matching password and confirmation.' });
+    }
+    const passwordCheck = validatePasswordStrength(password);
+    if (!passwordCheck.valid) {
+      return res.status(400).json({ success: false, message: passwordCheck.message });
+    }
+
+    const now = new Date();
+    const invitation = await Invitation.findOneAndUpdate(
+      { tokenHash: sha256(token), acceptedAt: null, revokedAt: null, expiresAt: { $gt: now } },
+      { $set: { acceptedAt: now } },
+      { new: true }
+    );
+    if (!invitation) {
+      return res.status(400).json({ success: false, message: 'This invitation is invalid, expired or already used. Contact your administrator for a new invitation.' });
+    }
+
+    const user = await User.findById(invitation.userId).select('+password');
+    if (!user || !user.invitationPending) {
+      return res.status(409).json({ success: false, message: 'This employee invitation is no longer active.' });
+    }
+
+    user.password = password;
+    user.invitationPending = false;
+    user.emailVerifiedAt = now;
+    user.mustChangePassword = false;
+    user.passwordChangedAt = now;
+    user.tokenVersion = (user.tokenVersion || 0) + 1;
+    await user.save();
+
+    await logAudit({
+      req, action: 'INVITATION_ACCEPTED', category: 'AUTH',
+      actor: user._id, actorEmail: user.email, actorName: user.fullName,
+      actorRole: 'Employee', targetType: 'User', targetId: user._id,
+      targetName: user.fullName, status: 'SUCCESS',
+      details: { emailVerified: true, passwordSet: true },
+    });
+
+    return res.json({ success: true, message: 'Your email has been verified and password set. You can now sign in with email OTP verification.' });
+  } catch (error) {
+    console.error('[Accept Invitation Error]:', error.message);
+    return res.status(500).json({ success: false, message: 'Unable to accept the invitation.' });
   }
 };
