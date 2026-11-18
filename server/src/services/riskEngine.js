@@ -8,12 +8,13 @@ export const assessLoginRisk = ({ device, ipAddress, userAgent, otpAttempts = 0 
     return { score: 100, level: 'High', decision: 'DENY', reasons: ['device_blocked'] };
   }
 
+  if (device?.status === 'Revoked') {
+    return { score: 100, level: 'High', decision: 'DENY', reasons: ['device_revoked_reenrollment_denied'] };
+  }
+
   if (!device) {
     score += 35;
     reasons.push('new_device');
-  } else if (device.status === 'Revoked') {
-    score += 20;
-    reasons.push('previously_revoked_device_reenrollment');
   }
 
   if (device?.lastIpAddress && ipAddress && device.lastIpAddress !== ipAddress) {
