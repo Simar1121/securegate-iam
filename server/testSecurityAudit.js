@@ -70,6 +70,32 @@ async function runSecurityTests() {
     }
   }
 
+  async function loginWithOtp(options = {}) {
+    const firstFactor = await api('/auth/login', options);
+    if (!firstFactor.data?.requiresOtp) return firstFactor;
+
+    const credentials = JSON.parse(options.body || '{}');
+    const recipient = String(credentials.identifier || credentials.email || '').toLowerCase();
+    const testMail = [...(globalThis.__securegateTestOutbox || [])]
+      .reverse()
+      .find((message) => message.purpose === 'LOGIN_OTP' && message.to.toLowerCase() === recipient);
+
+    if (!testMail) {
+      return { status: 500, ok: false, data: { message: 'Test OTP email was not captured.' } };
+    }
+
+    return api('/auth/login/verify-otp', {
+      method: 'POST',
+      body: JSON.stringify({
+        challengeId: firstFactor.data.challengeId,
+        code: testMail.code,
+        deviceId: 'a'.repeat(64),
+        deviceName: 'SecureGate automated test device',
+        platform: 'Node.js test runner',
+      }),
+    });
+  }
+
   // Always start an isolated test server on port 5010; never reuse the development server.
   let localServer;
   try {
@@ -103,7 +129,7 @@ async function runSecurityTests() {
 
     // TEST 1: Super Admin Authentication
     console.log('\n--- 1. Super Admin Authentication ---');
-    const superLogin = await api('/auth/login', {
+    const superLogin = await loginWithOtp({
       method: 'POST',
       body: JSON.stringify({ email: 'admin@securegate.io', password: 'Admin@123' }),
     });
@@ -115,7 +141,7 @@ async function runSecurityTests() {
 
     // TEST 2: IT Administrator Permissions
     console.log('\n--- 2. IT Administrator Permissions ---');
-    const itLogin = await api('/auth/login', {
+    const itLogin = await loginWithOtp({
       method: 'POST',
       body: JSON.stringify({ email: 'it@securegate.io', password: 'It@123' }),
     });
@@ -144,7 +170,7 @@ async function runSecurityTests() {
 
     // TEST 3: HR Manager Permissions
     console.log('\n--- 3. HR Manager Permissions ---');
-    const hrLogin = await api('/auth/login', {
+    const hrLogin = await loginWithOtp({
       method: 'POST',
       body: JSON.stringify({ email: 'hr@securegate.io', password: 'Hr@123' }),
     });
@@ -169,7 +195,7 @@ async function runSecurityTests() {
 
     // TEST 4: Employee Permissions
     console.log('\n--- 4. Employee Permissions ---');
-    const empLogin = await api('/auth/login', {
+    const empLogin = await loginWithOtp({
       method: 'POST',
       body: JSON.stringify({ email: 'sarah.dev@securegate.io', password: 'Employee@123' }),
     });
@@ -193,7 +219,7 @@ async function runSecurityTests() {
 
     // TEST 5: Suspended User Authentication
     console.log('\n--- 5. Suspended User Authentication ---');
-    const suspendedLogin = await api('/auth/login', {
+    const suspendedLogin = await loginWithOtp({
       method: 'POST',
       body: JSON.stringify({ email: 'david.ops@securegate.io', password: 'Employee@123' }),
     });
@@ -315,7 +341,7 @@ async function runSecurityTests() {
     // TEST 10: Session Revocation
     console.log('\n--- 10. Session Revocation ---');
     // 10A: Revocation on Logout
-    const sessionUserLogin = await api('/auth/login', {
+    const sessionUserLogin = await loginWithOtp({
       method: 'POST',
       body: JSON.stringify({ email: 'admin@securegate.io', password: 'Admin@123' }),
     });
@@ -337,7 +363,7 @@ async function runSecurityTests() {
 
     // 10B: Session Invalidation on Password Change
     const userForPass = await User.findOne({ email: 'sarah.dev@securegate.io' });
-    const userLoginBeforePass = await api('/auth/login', {
+    const userLoginBeforePass = await loginWithOtp({
       method: 'POST',
       body: JSON.stringify({ email: 'sarah.dev@securegate.io', password: 'Employee@123' }),
     });
@@ -363,7 +389,7 @@ async function runSecurityTests() {
     );
 
     // Reset password back for consistency
-    const resetLogin = await api('/auth/login', {
+    const resetLogin = await loginWithOtp({
       method: 'POST',
       body: JSON.stringify({ email: 'sarah.dev@securegate.io', password: 'NewEmployeePass@2026' }),
     });
@@ -393,13 +419,13 @@ async function runSecurityTests() {
 
     let fifthAttemptStatus = 0;
     for (let i = 1; i <= 4; i++) {
-      await api('/auth/login', {
+      await loginWithOtp({
         method: 'POST',
         body: JSON.stringify({ email: testEmail, password: 'WrongPassword@123' }),
       });
     }
 
-    const fifthAttempt = await api('/auth/login', {
+    const fifthAttempt = await loginWithOtp({
       method: 'POST',
       body: JSON.stringify({ email: testEmail, password: 'WrongPassword@123' }),
     });
@@ -409,7 +435,7 @@ async function runSecurityTests() {
       '5th consecutive failed login locks the account for 15 minutes (Status 423 Locked)'
     );
 
-    const sixthAttempt = await api('/auth/login', {
+    const sixthAttempt = await loginWithOtp({
       method: 'POST',
       body: JSON.stringify({ email: testEmail, password: 'TargetPassword@123' }), // even with correct password!
     });
