@@ -683,7 +683,7 @@ export const verifyLoginOtp = async (req, res) => {
       lastRiskScore: risk.score,
       lastRiskLevel: risk.level,
       trustScore: Math.max(0, 100 - risk.score),
-      status: risk.decision === 'DENY' ? 'Blocked' : 'Trusted',
+      status: existingDevice?.status === 'Revoked' ? 'Revoked' : (risk.decision === 'DENY' ? 'Blocked' : 'Trusted'),
     };
 
     const device = await Device.findOneAndUpdate(
