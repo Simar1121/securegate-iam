@@ -43,10 +43,11 @@ pipeline {
                         set +x
                         umask 077
 
-                        # These temporary files exist only in the Jenkins workspace.
-                        # They are ignored by Git and removed in the post-build cleanup.
-                        printf 'MONGO_INITDB_ROOT_USERNAME=%s\\nMONGO_INITDB_ROOT_PASSWORD=%s\\n' \
-                            "$MONGO_USER" "$MONGO_PASSWORD" > .env
+                        # Temporary files exist only in the Jenkins workspace.
+                        cat > .env <<EOF
+MONGO_INITDB_ROOT_USERNAME=$MONGO_USER
+MONGO_INITDB_ROOT_PASSWORD=$MONGO_PASSWORD
+EOF
 
                         cat > server/.env <<EOF
 PORT=5000
