@@ -410,7 +410,7 @@ export const Profile = () => {
           ) : (
             <div className="p-8 text-center text-xs text-slate-400 bg-charcoal-950 rounded-xl border border-charcoal-850">
               <div className="space-y-3">
-                <p className="font-semibold text-slate-200">No administrative role grants are assigned to this Employee role.</p>
+                <p className="font-semibold text-slate-200">No explicit role-based permission grants are assigned to this role.</p>
                 <p>Your account still has baseline self-service access through authenticated, account-scoped endpoints:</p>
                 <ul className="list-disc pl-5 space-y-1 text-left max-w-2xl mx-auto">
                   <li>View your own identity profile (<code>/api/auth/me</code>).</li>
