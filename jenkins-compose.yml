@@ -39,4 +39,4 @@ volumes:
   jenkins-docker-certs:
     name: securegate_jenkins_docker_certs
   jenkins-docker-data:
-    name: securegate_jenkins_docker_data
+    name: securegate_jenkins_docker_data_v28
