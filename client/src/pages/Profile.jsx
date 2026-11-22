@@ -224,7 +224,7 @@ export const Profile = () => {
             }`}
           >
             <Shield className="w-3.5 h-3.5" />
-            <span>Assigned Permissions ({isSuperAdmin ? 'All' : assignedPermissions.length})</span>
+            <span>Role Permissions ({isSuperAdmin ? 'All' : assignedPermissions.length})</span>
           </button>
 
           <button
@@ -371,7 +371,7 @@ export const Profile = () => {
             </div>
 
             <span className="text-xs font-mono px-3 py-1 rounded-full bg-charcoal-950 border border-charcoal-800 text-slate-300">
-              {isSuperAdmin ? 'Full Bypass Mode' : `${assignedPermissions.length} Active Grants`}
+              {isSuperAdmin ? 'Full Bypass Mode' : `${assignedPermissions.length} Role Grants`}
             </span>
           </div>
 
@@ -409,7 +409,16 @@ export const Profile = () => {
             </div>
           ) : (
             <div className="p-8 text-center text-xs text-slate-400 bg-charcoal-950 rounded-xl border border-charcoal-850">
-              Your account currently holds standard Employee self-service permissions (Profile Management & Password Rotation).
+              <div className="space-y-3">
+                <p className="font-semibold text-slate-200">No administrative role grants are assigned to this Employee role.</p>
+                <p>Your account still has baseline self-service access through authenticated, account-scoped endpoints:</p>
+                <ul className="list-disc pl-5 space-y-1 text-left max-w-2xl mx-auto">
+                  <li>View your own identity profile (<code>/api/auth/me</code>).</li>
+                  <li>Update your own phone, location and biography (<code>/api/auth/update-profile</code>).</li>
+                  <li>Change your own password (<code>/api/auth/change-password</code>).</li>
+                </ul>
+                <p className="text-slate-500">These self-service endpoints operate only on the signed-in account and do not grant access to the employee directory, role administration or audit logs.</p>
+              </div>
             </div>
           )}
         </div>
