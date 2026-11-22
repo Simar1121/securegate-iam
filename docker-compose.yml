@@ -1,0 +1,104 @@
+name: securegate-local
+
+services:
+  mongodb:
+    image: mongo:7.0
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME:?Set MONGO_INITDB_ROOT_USERNAME in the root .env file}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD:?Set MONGO_INITDB_ROOT_PASSWORD in the root .env file}
+    ports:
+      # Use 27018 so the existing Windows MongoDB service on 27017 is untouched.
+      - "127.0.0.1:27018:27017"
+    volumes:
+      - securegate_docker_mongodb_data:/data/db
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          mongosh --quiet
+          --username "$$MONGO_INITDB_ROOT_USERNAME"
+          --password "$$MONGO_INITDB_ROOT_PASSWORD"
+          --authenticationDatabase admin
+          --eval "db.adminCommand({ ping: 1 }).ok" | grep -q 1
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  backend:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+      target: production
+    restart: unless-stopped
+    env_file:
+      - ./server/.env
+    environment:
+      PORT: "5000"
+      NODE_ENV: production
+      MONGODB_URI: "mongodb://${MONGO_INITDB_ROOT_USERNAME}:${MONGO_INITDB_ROOT_PASSWORD}@mongodb:27017/securegate_docker_db?authSource=admin"
+      MONGODB_TEST_URI: "mongodb://${MONGO_INITDB_ROOT_USERNAME}:${MONGO_INITDB_ROOT_PASSWORD}@mongodb:27017/securegate_docker_test_db?authSource=admin"
+      CLIENT_URL: http://localhost:8080
+      FRONTEND_URL: http://localhost:8080
+      # Nginx is the single trusted reverse-proxy hop in this local stack.
+      TRUST_PROXY_HOPS: "1"
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:5001:5000"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:5000/api/health').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 25s
+
+  frontend:
+    build:
+      context: ./client
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: /api
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8080:80"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # This isolated test runner is excluded from normal startup.
+  # Run it explicitly with: docker compose --profile test run --rm backend-test
+  backend-test:
+    profiles: ["test"]
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+      target: test
+    env_file:
+      - ./server/.env
+    environment:
+      PORT: "5000"
+      NODE_ENV: test
+      MONGODB_URI: "mongodb://${MONGO_INITDB_ROOT_USERNAME}:${MONGO_INITDB_ROOT_PASSWORD}@mongodb:27017/securegate_docker_test_db?authSource=admin"
+      MONGODB_TEST_URI: "mongodb://${MONGO_INITDB_ROOT_USERNAME}:${MONGO_INITDB_ROOT_PASSWORD}@mongodb:27017/securegate_docker_test_db?authSource=admin"
+      CLIENT_URL: http://localhost:8080
+      TRUST_PROXY_HOPS: "0"
+    depends_on:
+      mongodb:
+        condition: service_healthy
+
+volumes:
+  securegate_docker_mongodb_data:
+    name: securegate_docker_mongodb_data
