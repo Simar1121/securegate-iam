@@ -24,7 +24,7 @@ pipeline {
 
                     # Fresh random credentials for this build only.
                     # They are never committed and are removed in post-build cleanup.
-                    CI_VOLUME_SUFFIX="$(printf '%s' "\${JOB_NAME}-\${BUILD_NUMBER}" | sha256sum | cut -c1-12)-\${BUILD_NUMBER}"
+                    CI_VOLUME_SUFFIX="$(printf '%s' "${JOB_NAME}-${BUILD_NUMBER}" | sha256sum | cut -c1-12)-${BUILD_NUMBER}"
                     MONGO_PASSWORD="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \\n')"
                     JWT_SECRET="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \\n')"
 
@@ -38,7 +38,7 @@ EOF
                     cat > .jenkins-ci-compose.yml <<'EOF'
 volumes:
   securegate_docker_mongodb_data:
-    name: securegate_jenkins_ci_\${CI_VOLUME_SUFFIX:?CI_VOLUME_SUFFIX is required}
+    name: securegate_jenkins_ci_${CI_VOLUME_SUFFIX:?CI_VOLUME_SUFFIX is required}
 EOF
 
                     cat > server/.env <<EOF
