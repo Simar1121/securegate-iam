@@ -293,21 +293,18 @@ The workflow builds and tests images only; it does not publish them to Docker Hu
 
 The repository includes a local Jenkins controller and an automated Declarative Pipeline. On Windows, use Docker Desktop with Linux containers enabled.
 
-1. Pull the branch containing the Jenkins files.
-2. Validate and start Jenkins:
+1. Start Jenkins:
 
    ~~~powershell
    docker compose -f jenkins-compose.yml config --quiet
    docker compose -f jenkins-compose.yml up --build -d
    ~~~
 
-3. Open http://localhost:8081 and complete the Jenkins setup wizard.
-4. In Manage Jenkins → Credentials → System → Global credentials, add these credentials with the exact IDs:
-   - securegate-ci-mongodb: Username with password. Use a dedicated CI-only MongoDB username and a fresh random alphanumeric password (at least 32 characters).
-   - securegate-ci-jwt-secret: Secret text. Use a fresh random JWT secret (at least 32 characters).
-   - securegate-ci-smtp: Username with password. Use the SecureGate sender email and its Google App Password. Keep these values in Jenkins only.
-5. Create a Multibranch Pipeline job, add the GitHub repository https://github.com/Simar1121/securegate-iam, set the script path to Jenkinsfile, and enable periodic branch indexing (for example, every 5 minutes). Include the develop and feature/secure-onboarding-2fa branches.
+2. Open http://localhost:8081 and complete the Jenkins setup wizard.
+3. Create a Multibranch Pipeline job, add the GitHub repository https://github.com/Simar1121/securegate-iam, set the script path to Jenkinsfile, and enable periodic branch indexing (for example, every 5 minutes). Include the develop and feature/secure-onboarding-2fa branches.
 
-The Jenkins pipeline creates temporary environment files from Jenkins credentials, validates Compose, builds the backend test image, runs the backend security suite against a disposable database, and builds the production backend and frontend images. The test process runs with NODE_ENV=test, which uses the application's test mail outbox rather than sending real invitation or OTP emails.
+Each build generates fresh random MongoDB and JWT secrets in temporary, permission-restricted workspace environment files. The backend security suite runs with NODE_ENV=test, so login OTP and invitation messages use the in-memory test outbox and no real SMTP account is needed for CI. No production Gmail credentials are loaded into the test job.
 
-Jenkins uses a separate, TLS-protected Docker-in-Docker engine. Its web interface is bound to 127.0.0.1:8081; the Docker daemon is not published to the Windows host. Jenkins data is retained in dedicated Docker volumes. The CI job removes only its own disposable test stack and workspace environment files after each run.
+The pipeline creates a unique MongoDB volume for each build by using a temporary Compose override. Cleanup removes only that build's disposable test volume; it does not touch the persistent volume used by the regular local SecureGate Docker stack. Temporary environment files are removed after the build.
+
+Jenkins uses a separate, TLS-protected Docker-in-Docker engine. Its web interface is bound to 127.0.0.1:8081; the Docker daemon is not published to the Windows host. Jenkins data is retained in dedicated Docker volumes.
