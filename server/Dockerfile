@@ -1,10 +1,11 @@
-FROM node:22-alpine AS base
+FROM node:22-bookworm-slim AS base
 
 WORKDIR /app
 ENV NODE_ENV=production
 
 COPY package*.json ./
-RUN npm ci --omit=dev --no-audit --no-fund     && npm cache clean --force
+RUN npm ci --omit=dev --no-audit --no-fund --fetch-retries=5 --fetch-timeout=120000 \
+    && npm cache clean --force
 
 COPY --chown=node:node src ./src
 
