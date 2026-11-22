@@ -222,3 +222,68 @@ The backend uses Nodemailer 10.6.0 and requires Node.js 20 or later. After pulli
 The security audit suite now exercises password-plus-OTP login, OTP replay rejection, invitation acceptance, trusted device registration and revocation, legacy-token rejection, administrator seat limits and protection of the sole Super Admin.
 
 Run it only against a separate disposable MongoDB database whose name contains `test`, for example `securegate_test_db`. Never point the destructive security test suite at `securegate_org_db`.
+
+
+---
+
+## Docker local environment
+
+SecureGate can run as a containerized local stack using Docker Compose:
+
+- **Frontend:** React production build served by Nginx at `http://localhost:8080`.
+- **Backend:** Express API at `http://localhost:5001/api` (also reached through the frontend's same-origin `/api` proxy).
+- **MongoDB:** Isolated MongoDB 7 container, available to MongoDB Compass at `mongodb://localhost:27018` with the credentials configured in the root `.env` file.
+
+### Data safety
+
+The Docker stack uses a separate MongoDB container, a persistent Docker volume named `securegate_docker_mongodb_data`, and the databases `securegate_docker_db` and `securegate_docker_test_db`.
+
+It does **not** connect to, import, reset, or replace the Windows-host `securegate_org_db` database. The Docker MongoDB service maps to host port `27018` so the existing local MongoDB service on port `27017` remains untouched.
+
+### First-time setup on Windows PowerShell
+
+1. Start Docker Desktop and wait until the Docker Engine is running.
+2. From the repository root, create the root Docker environment file if it does not already exist:
+
+   ```powershell
+   if (-not (Test-Path .env)) { Copy-Item docker.env.example .env }
+   ```
+
+3. Edit the root `.env` file and replace `MONGO_INITDB_ROOT_PASSWORD` with a unique random alphanumeric password of at least 32 characters. Keep that value stable for this Docker volume.
+4. Ensure `server/.env` exists. If it does not, copy `server/.env.example` to `server/.env`, then configure a strong `JWT_SECRET` and your Gmail SMTP App Password. Do not overwrite an existing `server/.env`.
+5. Start the containers:
+
+   ```powershell
+   docker compose up --build -d
+   ```
+
+6. Check service health:
+
+   ```powershell
+   docker compose ps
+   docker compose logs -f backend
+   ```
+
+7. Open `http://localhost:8080`. This Docker database is separate and starts empty, so complete the initial organization setup to create its first Super Admin. Invitation and OTP emails use the SMTP settings from `server/.env`.
+
+### Containerized security test suite
+
+The test runner is isolated from the application image and only targets `securegate_docker_test_db`:
+
+```powershell
+docker compose --profile test run --rm backend-test
+```
+
+### Stop the local stack
+
+```powershell
+docker compose down
+```
+
+This stops and removes the containers but preserves the named MongoDB volume. Do not use `docker compose down --volumes` for your local environment unless you intentionally want to delete the Docker MongoDB data.
+
+### Automated Docker validation
+
+GitHub Actions runs the Docker Compose validation, builds the frontend/backend/test images, runs the backend security suite against the isolated Docker test database, and smoke-tests the frontend and API through Nginx on pushes to the development branches and pull requests targeting `develop`.
+
+The workflow builds and tests images only; it does not publish them to Docker Hub. Registry publishing can be configured separately when a Docker Hub account and repository secrets are ready.
