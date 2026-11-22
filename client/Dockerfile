@@ -2,7 +2,24 @@ FROM node:22-bookworm-slim AS build
 
 WORKDIR /app
 COPY package*.json ./
-RUN npm ci --no-audit --no-fund --fetch-retries=5 --fetch-timeout=120000
+RUN set -eu; \
+    for attempt in 1 2 3; do \
+      echo "Dependency install attempt $attempt/3"; \
+      if npm ci --no-audit --no-fund --maxsockets=5 --fetch-retries=8 --fetch-timeout=300000 --loglevel=verbose; then \
+        break; \
+      else \
+        status=$?; \
+        if [ "$attempt" -eq 3 ]; then \
+          echo "npm failed after 3 attempts; printing recent npm diagnostics"; \
+          for logfile in /root/.npm/_logs/*debug-0.log; do \
+            if [ -f "$logfile" ]; then tail -n 120 "$logfile"; fi; \
+          done; \
+          exit "$status"; \
+        fi; \
+        echo "npm attempt failed (exit $status); retrying with the npm cache retained"; \
+        sleep 8; \
+      fi; \
+    done
 
 COPY . .
 ARG VITE_API_URL=/api
