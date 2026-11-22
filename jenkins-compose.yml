@@ -2,7 +2,7 @@ name: securegate-jenkins
 
 services:
   docker:
-    image: docker:29-dind
+    image: docker:28-dind
     privileged: true
     restart: unless-stopped
     environment:
