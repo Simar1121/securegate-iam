@@ -206,17 +206,68 @@ async function runSecurityTests() {
     const empToken = empLogin.data.token;
 
     const empMe = await api('/auth/me', {
-      headers: { Authorization: `Bearer ${empToken}` },
+      headers: { Authorization: 'Bearer ' + empToken },
     });
     assert(empMe.status === 200, 'Employee can view their own profile (/auth/me)');
+    assert(
+      empMe.data.user?.role?.name === 'Employee' &&
+      Array.isArray(empMe.data.user?.role?.permissions) &&
+      empMe.data.user.role.permissions.length === 0,
+      'Employee role has zero explicit administrative RBAC grants; self-service is separate'
+    );
+
+    // Self-service updates may change only the signed-in employee's approved
+    // personal fields. Attempts to mass-assign identity, role or account state
+    // are ignored by the controller's explicit field allowlist.
+    const empSelfServiceUpdate = await api('/auth/update-profile', {
+      method: 'PUT',
+      headers: { Authorization: 'Bearer ' + empToken },
+      body: JSON.stringify({
+        phone: '555-0101',
+        location: 'SecureGate QA Office',
+        bio: 'Self-service access validation',
+        email: 'unauthorized.change@securegate.io',
+        status: 'Suspended',
+        role: superAdminRole._id.toString(),
+        department: 'Unauthorized Department',
+      }),
+    });
+    const employeeAfterSelfServiceUpdate = await User.findById(empMe.data.user.id).populate('role');
+    assert(
+      empSelfServiceUpdate.status === 200 &&
+      employeeAfterSelfServiceUpdate?.phone === '555-0101' &&
+      employeeAfterSelfServiceUpdate?.location === 'SecureGate QA Office' &&
+      employeeAfterSelfServiceUpdate?.email === empMe.data.user.email &&
+      employeeAfterSelfServiceUpdate?.status === 'Active' &&
+      employeeAfterSelfServiceUpdate?.role?.name === 'Employee' &&
+      employeeAfterSelfServiceUpdate?.department === 'Engineering',
+      'Employee can update approved personal fields only; email, status, role and department remain protected'
+    );
 
     const empUserList = await api('/users', {
-      headers: { Authorization: `Bearer ${empToken}` },
+      headers: { Authorization: 'Bearer ' + empToken },
     });
     assert(empUserList.status === 403, 'Employee is blocked from user directory (/users: 403 Forbidden)');
 
+    const empOtherProfile = await api('/users/' + empMe.data.user.id, {
+      headers: { Authorization: 'Bearer ' + empToken },
+    });
+    assert(empOtherProfile.status === 403, 'Employee cannot access directory profile endpoints without users:read');
+
+    const empAdminUpdate = await api('/users/' + empMe.data.user.id, {
+      method: 'PUT',
+      headers: { Authorization: 'Bearer ' + empToken },
+      body: JSON.stringify({ department: 'Unauthorized Department' }),
+    });
+    assert(empAdminUpdate.status === 403, 'Employee cannot use administrative user-update endpoint without users:update');
+
+    const empRoleList = await api('/roles', {
+      headers: { Authorization: 'Bearer ' + empToken },
+    });
+    assert(empRoleList.status === 403, 'Employee is blocked from role administration (/roles: 403 Forbidden)');
+
     const empAuditLogs = await api('/audit-logs', {
-      headers: { Authorization: `Bearer ${empToken}` },
+      headers: { Authorization: 'Bearer ' + empToken },
     });
     assert(empAuditLogs.status === 403, 'Employee is blocked from audit logs (/audit-logs: 403 Forbidden)');
 
