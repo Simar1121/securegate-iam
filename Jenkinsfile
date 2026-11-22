@@ -8,11 +8,6 @@ pipeline {
         timeout(time: 45, unit: 'MINUTES')
     }
 
-    environment {
-        CI_COMPOSE_PROJECT = 'securegate-jenkins-ci'
-        DOCKER_BUILDKIT = '1'
-    }
-
     stages {
         stage('Checkout') {
             steps {
@@ -21,83 +16,73 @@ pipeline {
             }
         }
 
-        stage('Prepare isolated CI credentials') {
+        stage('Generate disposable CI credentials') {
             steps {
-                withCredentials([
-                    usernamePassword(
-                        credentialsId: 'securegate-ci-mongodb',
-                        usernameVariable: 'MONGO_USER',
-                        passwordVariable: 'MONGO_PASSWORD'
-                    ),
-                    string(
-                        credentialsId: 'securegate-ci-jwt-secret',
-                        variable: 'JWT_SECRET'
-                    ),
-                    usernamePassword(
-                        credentialsId: 'securegate-ci-smtp',
-                        usernameVariable: 'SMTP_USER',
-                        passwordVariable: 'SMTP_APP_PASSWORD'
-                    )
-                ]) {
-                    sh '''
-                        set +x
-                        umask 077
+                sh '''
+                    set +x
+                    umask 077
 
-                        # Temporary files exist only in the Jenkins workspace.
-                        cat > .env <<EOF
-MONGO_INITDB_ROOT_USERNAME=$MONGO_USER
+                    # Fresh random credentials for this build only.
+                    # They are never committed and are removed in post-build cleanup.
+                    CI_VOLUME_SUFFIX="$(printf '%s' "\${JOB_NAME}-\${BUILD_NUMBER}" | sha256sum | cut -c1-12)-\${BUILD_NUMBER}"
+                    MONGO_PASSWORD="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \\n')"
+                    JWT_SECRET="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \\n')"
+
+                    cat > .env <<EOF
+MONGO_INITDB_ROOT_USERNAME=securegate_ci
 MONGO_INITDB_ROOT_PASSWORD=$MONGO_PASSWORD
+COMPOSE_PROJECT_NAME=sgjenkins-$CI_VOLUME_SUFFIX
+CI_VOLUME_SUFFIX=$CI_VOLUME_SUFFIX
 EOF
 
-                        cat > server/.env <<EOF
+                    cat > .jenkins-ci-compose.yml <<'EOF'
+volumes:
+  securegate_docker_mongodb_data:
+    name: securegate_jenkins_ci_\${CI_VOLUME_SUFFIX:?CI_VOLUME_SUFFIX is required}
+EOF
+
+                    cat > server/.env <<EOF
 PORT=5000
 NODE_ENV=test
-MONGODB_URI=mongodb://$MONGO_USER:$MONGO_PASSWORD@mongodb:27017/securegate_jenkins_test?authSource=admin
-MONGODB_TEST_URI=mongodb://$MONGO_USER:$MONGO_PASSWORD@mongodb:27017/securegate_jenkins_test?authSource=admin
+MONGODB_URI=mongodb://securegate_ci:$MONGO_PASSWORD@mongodb:27017/securegate_jenkins_test?authSource=admin
+MONGODB_TEST_URI=mongodb://securegate_ci:$MONGO_PASSWORD@mongodb:27017/securegate_jenkins_test?authSource=admin
 JWT_SECRET=$JWT_SECRET
 JWT_EXPIRES_IN=7d
 CLIENT_URL=http://localhost:8080
 TRUST_PROXY_HOPS=0
-SMTP_HOST=smtp.gmail.com
-SMTP_PORT=587
-SMTP_SECURE=false
-SMTP_USER=$SMTP_USER
-SMTP_APP_PASSWORD=$SMTP_APP_PASSWORD
-EMAIL_FROM=SecureGate CI <$SMTP_USER>
 FRONTEND_URL=http://localhost:8080
 EOF
-                    '''
-                }
+                '''
             }
         }
 
         stage('Validate Compose configuration') {
             steps {
-                sh 'docker compose -p "$CI_COMPOSE_PROJECT" config --quiet'
+                sh 'docker compose -f docker-compose.yml -f .jenkins-ci-compose.yml config --quiet'
             }
         }
 
         stage('Build backend test image') {
             steps {
-                sh 'docker compose -p "$CI_COMPOSE_PROJECT" --profile test build backend-test'
+                sh 'docker compose -f docker-compose.yml -f .jenkins-ci-compose.yml --profile test build backend-test'
             }
         }
 
         stage('Start isolated test database') {
             steps {
-                sh 'docker compose -p "$CI_COMPOSE_PROJECT" up -d mongodb'
+                sh 'docker compose -f docker-compose.yml -f .jenkins-ci-compose.yml up -d mongodb'
             }
         }
 
         stage('Run backend security regression suite') {
             steps {
-                sh 'docker compose -p "$CI_COMPOSE_PROJECT" --profile test run --rm backend-test'
+                sh 'docker compose -f docker-compose.yml -f .jenkins-ci-compose.yml --profile test run --rm backend-test'
             }
         }
 
         stage('Build production backend and frontend') {
             steps {
-                sh 'docker compose -p "$CI_COMPOSE_PROJECT" build backend frontend'
+                sh 'docker compose -f docker-compose.yml -f .jenkins-ci-compose.yml build backend frontend'
             }
         }
     }
@@ -106,15 +91,15 @@ EOF
         always {
             sh '''
                 set +x
-                docker compose -p securegate-jenkins-ci down --volumes --remove-orphans || true
-                rm -f .env server/.env
+                docker compose -f docker-compose.yml -f .jenkins-ci-compose.yml down --volumes --remove-orphans || true
+                rm -f .env server/.env .jenkins-ci-compose.yml
             '''
         }
         success {
-            echo 'SecureGate CI passed: backend security tests and production image builds completed.'
+            echo 'SecureGate CI passed: backend security tests and production frontend/backend image builds completed.'
         }
         failure {
-            echo 'SecureGate CI failed. Review the stage logs above; no test database is retained.'
+            echo 'SecureGate CI failed. Review the stage logs above; disposable database data and temporary environment files are cleaned up.'
         }
     }
 }
