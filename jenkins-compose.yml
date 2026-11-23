@@ -10,7 +10,10 @@ services:
     environment:
       DOCKER_TLS_CERTDIR: /certs
     volumes:
-      - jenkins-docker-certs:/certs/client
+      # Persist the full DinD certificate tree and isolate client certificates
+      # for the read-only Jenkins mount below.
+      - jenkins-docker-certs-full:/certs
+      - jenkins-docker-client-certs:/certs/client
       - jenkins-docker-data:/var/lib/docker
     networks:
       default:
@@ -33,12 +36,16 @@ services:
       - "127.0.0.1:8081:8080"
     volumes:
       - jenkins_home:/var/jenkins_home
-      - jenkins-docker-certs:/certs/client:ro
+      - jenkins-docker-client-certs:/certs/client:ro
 
 volumes:
   jenkins_home:
     name: securegate_jenkins_home
   jenkins-docker-certs:
     name: securegate_jenkins_docker_certs
+  jenkins-docker-certs-full:
+    name: securegate_jenkins_docker_certs_full
+  jenkins-docker-client-certs:
+    name: securegate_jenkins_docker_client_certs
   jenkins-docker-data:
     name: securegate_jenkins_docker_data_v28
