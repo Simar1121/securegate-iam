@@ -7,7 +7,8 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
-    "test": "node testSecurityAudit.js"
+    "test": "npm run test:risk && node testSecurityAudit.js",
+    "test:risk": "node --test test/riskEngine.test.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
