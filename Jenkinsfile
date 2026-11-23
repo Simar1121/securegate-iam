@@ -85,16 +85,30 @@ EOF
         stage('Prepare BuildKit host networking') {
             steps {
                 sh '''
+                    set -eu
+
+                    # Buildx cannot create a docker-container builder directly from
+                    # TLS credentials supplied only through DOCKER_* environment vars.
+                    # Persist the same TLS endpoint as a named Docker context first.
+                    DOCKER_CONTEXT_NAME=securegate-dind
+
+                    if ! docker context inspect "$DOCKER_CONTEXT_NAME" >/dev/null 2>&1; then
+                        docker context create "$DOCKER_CONTEXT_NAME" \
+                            --description "SecureGate Jenkins TLS Docker-in-Docker endpoint" \
+                            --docker "host=$DOCKER_HOST,ca=$DOCKER_CERT_PATH/ca.pem,cert=$DOCKER_CERT_PATH/cert.pem,key=$DOCKER_CERT_PATH/key.pem"
+                    fi
+
                     if ! docker buildx inspect securegate-ci >/dev/null 2>&1; then
                         docker buildx create \
                             --name securegate-ci \
                             --driver docker-container \
                             --driver-opt network=host \
                             --buildkitd-flags '--allow-insecure-entitlement network.host' \
-                            --use
+                            --use "$DOCKER_CONTEXT_NAME"
                     else
                         docker buildx use securegate-ci
                     fi
+
                     docker buildx inspect --bootstrap
                 '''
             }
