@@ -6,6 +6,7 @@ import { ProtectedRoute } from './ProtectedRoute';
 
 // Pages
 import { Login } from '../pages/Login';
+import { AcceptInvitation } from '../pages/AcceptInvitation';
 import { Dashboard } from '../pages/Dashboard';
 import { Users } from '../pages/Users';
 import { Roles } from '../pages/Roles';
@@ -33,6 +34,7 @@ export const AppRoutes = () => {
     <Routes>
       {/* Public Routes */}
       <Route path="/login" element={<Login />} />
+      <Route path="/accept-invitation" element={<AcceptInvitation />} />
       <Route path="/register" element={<Navigate to="/login" replace />} />
 
       {/* Authenticated Workspace */}

@@ -14,6 +14,7 @@ import permissionRoutes from './routes/permissionRoutes.js';
 import auditRoutes from './routes/auditRoutes.js';
 import dashboardRoutes from './routes/dashboardRoutes.js';
 import setupRoutes from './routes/setupRoutes.js';
+import deviceRoutes from './routes/deviceRoutes.js';
 
 // Load environment variables
 dotenv.config();
@@ -49,6 +50,7 @@ app.use(
 // 2. Strict CORS Configuration
 const allowedOrigins = [
   process.env.CLIENT_URL,
+  process.env.FRONTEND_URL,
   'http://localhost:5173',
   'http://127.0.0.1:5173',
 ].filter(Boolean);
@@ -64,7 +66,7 @@ app.use(
     },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-SecureGate-Device'],
   })
 );
 
@@ -84,7 +86,9 @@ const generalApiLimiter = rateLimit({
 // Strict Auth Route Limiter (Brute-force protection on Login/Register)
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 20, // Max 20 attempts per 15 minutes per IP
+  // Keep production strict. The security test suite deliberately exercises
+  // multiple independent login flows from one test IP in a single run.
+  max: process.env.NODE_ENV === 'test' ? 1000 : 20,
   standardHeaders: true,
   legacyHeaders: false,
   message: {
@@ -95,6 +99,7 @@ const authLimiter = rateLimit({
 
 app.use('/api', generalApiLimiter);
 app.use('/api/auth/login', authLimiter);
+app.use('/api/auth/invitations/accept', authLimiter);
 app.use('/api/auth/register', authLimiter);
 
 // 4. Request Body Parsers with Safe Size Limits (DoS / Memory exhaustion protection)
@@ -126,6 +131,7 @@ app.use('/api/roles', roleRoutes);
 app.use('/api/permissions', permissionRoutes);
 app.use('/api/audit-logs', auditRoutes);
 app.use('/api/dashboard', dashboardRoutes);
+app.use('/api/devices', deviceRoutes);
 
 // 404 Handler for undefined routes
 app.use((req, res, next) => {

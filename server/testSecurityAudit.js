@@ -23,6 +23,7 @@ if (!/(^|[_-])test([_-]|$)/i.test(testDatabaseName)) {
 
 process.env.NODE_ENV = 'test';
 process.env.MONGODB_URI = testMongoUri;
+process.env.CLIENT_URL = process.env.CLIENT_URL || 'http://localhost:5173';
 process.env.ALLOW_DESTRUCTIVE_SEED = 'true';
 
 const mongoose = (await import('mongoose')).default;
@@ -32,6 +33,7 @@ const User = (await import('./src/models/User.js')).default;
 const Role = (await import('./src/models/Role.js')).default;
 const AuditLog = (await import('./src/models/AuditLog.js')).default;
 const RevokedToken = (await import('./src/models/RevokedToken.js')).default;
+const AuthChallenge = (await import('./src/models/AuthChallenge.js')).default;
 const { seedDatabase } = await import('./src/utils/seedData.js');
 
 async function runSecurityTests() {
@@ -60,6 +62,7 @@ async function runSecurityTests() {
         ...options,
         headers: {
           'Content-Type': 'application/json',
+          'X-SecureGate-Device': 'a'.repeat(64),
           ...(options.headers || {}),
         },
       });
@@ -70,11 +73,37 @@ async function runSecurityTests() {
     }
   }
 
+  async function loginWithOtp(options = {}) {
+    const firstFactor = await api('/auth/login', options);
+    if (!firstFactor.data?.requiresOtp) return firstFactor;
+
+    const credentials = JSON.parse(options.body || '{}');
+    const recipient = String(credentials.identifier || credentials.email || '').toLowerCase();
+    const testMail = [...(globalThis.__securegateTestOutbox || [])]
+      .reverse()
+      .find((message) => message.purpose === 'LOGIN_OTP' && message.to.toLowerCase() === recipient);
+
+    if (!testMail) {
+      return { status: 500, ok: false, data: { message: 'Test OTP email was not captured.' } };
+    }
+
+    return api('/auth/login/verify-otp', {
+      method: 'POST',
+      body: JSON.stringify({
+        challengeId: firstFactor.data.challengeId,
+        code: testMail.code,
+        deviceId: 'a'.repeat(64),
+        deviceName: 'SecureGate automated test device',
+        platform: 'Node.js test runner',
+      }),
+    });
+  }
+
   // Always start an isolated test server on port 5010; never reuse the development server.
-  let localServer;
+  const localServers = [];
   try {
     await mongoose.connection.asPromise();
-    localServer = app.listen(5010);
+    localServers.push(app.listen(5010));
   } catch (error) {
     console.error('[TEST SETUP] MongoDB test database connection failed:', error.message);
     process.exit(1);
@@ -83,11 +112,11 @@ async function runSecurityTests() {
   try {
     const check = await fetch('http://localhost:5000/api/health').catch(() => null);
     if (!check || !check.ok) {
-      localServer = app.listen(5000);
+      localServers.push(app.listen(5000));
       await new Promise((resolve) => setTimeout(resolve, 500));
     }
   } catch {
-    localServer = app.listen(5000);
+    localServers.push(app.listen(5000));
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
 
@@ -103,7 +132,7 @@ async function runSecurityTests() {
 
     // TEST 1: Super Admin Authentication
     console.log('\n--- 1. Super Admin Authentication ---');
-    const superLogin = await api('/auth/login', {
+    const superLogin = await loginWithOtp({
       method: 'POST',
       body: JSON.stringify({ email: 'admin@securegate.io', password: 'Admin@123' }),
     });
@@ -115,7 +144,7 @@ async function runSecurityTests() {
 
     // TEST 2: IT Administrator Permissions
     console.log('\n--- 2. IT Administrator Permissions ---');
-    const itLogin = await api('/auth/login', {
+    const itLogin = await loginWithOtp({
       method: 'POST',
       body: JSON.stringify({ email: 'it@securegate.io', password: 'It@123' }),
     });
@@ -144,7 +173,7 @@ async function runSecurityTests() {
 
     // TEST 3: HR Manager Permissions
     console.log('\n--- 3. HR Manager Permissions ---');
-    const hrLogin = await api('/auth/login', {
+    const hrLogin = await loginWithOtp({
       method: 'POST',
       body: JSON.stringify({ email: 'hr@securegate.io', password: 'Hr@123' }),
     });
@@ -169,7 +198,7 @@ async function runSecurityTests() {
 
     // TEST 4: Employee Permissions
     console.log('\n--- 4. Employee Permissions ---');
-    const empLogin = await api('/auth/login', {
+    const empLogin = await loginWithOtp({
       method: 'POST',
       body: JSON.stringify({ email: 'sarah.dev@securegate.io', password: 'Employee@123' }),
     });
@@ -177,23 +206,74 @@ async function runSecurityTests() {
     const empToken = empLogin.data.token;
 
     const empMe = await api('/auth/me', {
-      headers: { Authorization: `Bearer ${empToken}` },
+      headers: { Authorization: 'Bearer ' + empToken },
     });
     assert(empMe.status === 200, 'Employee can view their own profile (/auth/me)');
+    assert(
+      empMe.data.user?.role?.name === 'Employee' &&
+      Array.isArray(empMe.data.user?.role?.permissions) &&
+      empMe.data.user.role.permissions.length === 0,
+      'Employee role has zero explicit administrative RBAC grants; self-service is separate'
+    );
+
+    // Self-service updates may change only the signed-in employee's approved
+    // personal fields. Attempts to mass-assign identity, role or account state
+    // are ignored by the controller's explicit field allowlist.
+    const empSelfServiceUpdate = await api('/auth/update-profile', {
+      method: 'PUT',
+      headers: { Authorization: 'Bearer ' + empToken },
+      body: JSON.stringify({
+        phone: '555-0101',
+        location: 'SecureGate QA Office',
+        bio: 'Self-service access validation',
+        email: 'unauthorized.change@securegate.io',
+        status: 'Suspended',
+        role: superAdminRole._id.toString(),
+        department: 'Unauthorized Department',
+      }),
+    });
+    const employeeAfterSelfServiceUpdate = await User.findById(empMe.data.user.id).populate('role');
+    assert(
+      empSelfServiceUpdate.status === 200 &&
+      employeeAfterSelfServiceUpdate?.phone === '555-0101' &&
+      employeeAfterSelfServiceUpdate?.location === 'SecureGate QA Office' &&
+      employeeAfterSelfServiceUpdate?.email === empMe.data.user.email &&
+      employeeAfterSelfServiceUpdate?.status === 'Active' &&
+      employeeAfterSelfServiceUpdate?.role?.name === 'Employee' &&
+      employeeAfterSelfServiceUpdate?.department === 'Engineering',
+      'Employee can update approved personal fields only; email, status, role and department remain protected'
+    );
 
     const empUserList = await api('/users', {
-      headers: { Authorization: `Bearer ${empToken}` },
+      headers: { Authorization: 'Bearer ' + empToken },
     });
     assert(empUserList.status === 403, 'Employee is blocked from user directory (/users: 403 Forbidden)');
 
+    const empOtherProfile = await api('/users/' + empMe.data.user.id, {
+      headers: { Authorization: 'Bearer ' + empToken },
+    });
+    assert(empOtherProfile.status === 403, 'Employee cannot access directory profile endpoints without users:read');
+
+    const empAdminUpdate = await api('/users/' + empMe.data.user.id, {
+      method: 'PUT',
+      headers: { Authorization: 'Bearer ' + empToken },
+      body: JSON.stringify({ department: 'Unauthorized Department' }),
+    });
+    assert(empAdminUpdate.status === 403, 'Employee cannot use administrative user-update endpoint without users:update');
+
+    const empRoleList = await api('/roles', {
+      headers: { Authorization: 'Bearer ' + empToken },
+    });
+    assert(empRoleList.status === 403, 'Employee is blocked from role administration (/roles: 403 Forbidden)');
+
     const empAuditLogs = await api('/audit-logs', {
-      headers: { Authorization: `Bearer ${empToken}` },
+      headers: { Authorization: 'Bearer ' + empToken },
     });
     assert(empAuditLogs.status === 403, 'Employee is blocked from audit logs (/audit-logs: 403 Forbidden)');
 
     // TEST 5: Suspended User Authentication
     console.log('\n--- 5. Suspended User Authentication ---');
-    const suspendedLogin = await api('/auth/login', {
+    const suspendedLogin = await loginWithOtp({
       method: 'POST',
       body: JSON.stringify({ email: 'david.ops@securegate.io', password: 'Employee@123' }),
     });
@@ -241,7 +321,9 @@ async function runSecurityTests() {
       }),
     });
     assert(
-      hrCreateAdmin.status === 403 && hrCreateAdmin.data.message.includes('Privilege Escalation Blocked'),
+      hrCreateAdmin.status === 403 &&
+      typeof hrCreateAdmin.data.message === 'string' &&
+      !(await User.exists({ email: 'malicious.admin@securegate.io' })),
       'HR Manager cannot create a new Super Admin account (Blocked with 403 Forbidden)'
     );
 
@@ -257,7 +339,9 @@ async function runSecurityTests() {
       }),
     });
     assert(
-      hrCreateIT.status === 403 && hrCreateIT.data.message.includes('Privilege Escalation Blocked'),
+      hrCreateIT.status === 403 &&
+      typeof hrCreateIT.data.message === 'string' &&
+      !(await User.exists({ email: 'malicious.it@securegate.io' })),
       'HR Manager cannot create an IT Administrator account (Blocked with 403 Forbidden)'
     );
 
@@ -315,11 +399,15 @@ async function runSecurityTests() {
     // TEST 10: Session Revocation
     console.log('\n--- 10. Session Revocation ---');
     // 10A: Revocation on Logout
-    const sessionUserLogin = await api('/auth/login', {
+    const sessionUserLogin = await loginWithOtp({
       method: 'POST',
       body: JSON.stringify({ email: 'admin@securegate.io', password: 'Admin@123' }),
     });
     const sessionTokenA = sessionUserLogin.data.token;
+    assert(
+      !!sessionTokenA && sessionTokenA !== superToken,
+      'Each login receives a unique JWT session identifier, even for the same user and device'
+    );
 
     const logoutRes = await api('/auth/logout', {
       method: 'POST',
@@ -334,10 +422,17 @@ async function runSecurityTests() {
       reuseLoggedOutToken.status === 401 && reuseLoggedOutToken.data.message.includes('revoked'),
       'Previously logged out token is rejected by server blacklist (401 Unauthorized)'
     );
+    const independentSessionStillActive = await api('/auth/me', {
+      headers: { Authorization: `Bearer ${superToken}` },
+    });
+    assert(
+      independentSessionStillActive.status === 200,
+      'Logging out one session does not revoke a separate session for the same user and device'
+    );
 
     // 10B: Session Invalidation on Password Change
     const userForPass = await User.findOne({ email: 'sarah.dev@securegate.io' });
-    const userLoginBeforePass = await api('/auth/login', {
+    const userLoginBeforePass = await loginWithOtp({
       method: 'POST',
       body: JSON.stringify({ email: 'sarah.dev@securegate.io', password: 'Employee@123' }),
     });
@@ -363,7 +458,7 @@ async function runSecurityTests() {
     );
 
     // Reset password back for consistency
-    const resetLogin = await api('/auth/login', {
+    const resetLogin = await loginWithOtp({
       method: 'POST',
       body: JSON.stringify({ email: 'sarah.dev@securegate.io', password: 'NewEmployeePass@2026' }),
     });
@@ -393,13 +488,13 @@ async function runSecurityTests() {
 
     let fifthAttemptStatus = 0;
     for (let i = 1; i <= 4; i++) {
-      await api('/auth/login', {
+      await loginWithOtp({
         method: 'POST',
         body: JSON.stringify({ email: testEmail, password: 'WrongPassword@123' }),
       });
     }
 
-    const fifthAttempt = await api('/auth/login', {
+    const fifthAttempt = await loginWithOtp({
       method: 'POST',
       body: JSON.stringify({ email: testEmail, password: 'WrongPassword@123' }),
     });
@@ -409,7 +504,7 @@ async function runSecurityTests() {
       '5th consecutive failed login locks the account for 15 minutes (Status 423 Locked)'
     );
 
-    const sixthAttempt = await api('/auth/login', {
+    const sixthAttempt = await loginWithOtp({
       method: 'POST',
       body: JSON.stringify({ email: testEmail, password: 'TargetPassword@123' }), // even with correct password!
     });
@@ -445,6 +540,324 @@ async function runSecurityTests() {
     const escalationLog = await AuditLog.findOne({ action: 'PRIVILEGE_ESCALATION_BLOCKED' });
     assert(!!escalationLog, 'PRIVILEGE_ESCALATION_BLOCKED security event successfully logged in audit trail');
 
+    // TEST 13: Mandatory email MFA, invitation onboarding, device trust and admin governance
+    console.log('\n--- 13. MFA, Invitations, Trusted Devices and Admin Governance ---');
+
+    // Password verification alone must never return a bearer token.
+    const firstFactorOnly = await api('/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ email: 'admin@securegate.io', password: 'Admin@123' }),
+    });
+    assert(
+      firstFactorOnly.status === 200 &&
+      firstFactorOnly.data?.requiresOtp === true &&
+      !firstFactorOnly.data?.token &&
+      typeof firstFactorOnly.data?.challengeId === 'string',
+      'First-factor password verification returns an OTP challenge and no access JWT',
+      JSON.stringify({ status: firstFactorOnly.status, response: firstFactorOnly.data })
+    );
+    if (firstFactorOnly.status !== 200 || !firstFactorOnly.data?.requiresOtp ||
+        typeof firstFactorOnly.data?.challengeId !== 'string') {
+      throw new Error('Could not create the OTP challenge for the resend test. Check the login response printed above.');
+    }
+
+    const firstFactorMail = [...(globalThis.__securegateTestOutbox || [])]
+      .reverse()
+      .find((message) => message.purpose === 'LOGIN_OTP' && message.to === 'admin@securegate.io');
+    const wrongOtpCode = firstFactorMail?.code === '000000' ? '000001' : '000000';
+    const wrongOtpAttempt = await api('/auth/login/verify-otp', {
+      method: 'POST',
+      body: JSON.stringify({
+        challengeId: firstFactorOnly.data.challengeId,
+        code: wrongOtpCode,
+        deviceId: 'b'.repeat(64),
+        deviceName: 'MFA test device',
+        platform: 'Node.js test runner',
+      }),
+    });
+    const adminOtpUser = await User.findOne({ email: 'admin@securegate.io' });
+    if (!adminOtpUser) throw new Error('Seeded Super Admin account was not found in securegate_test_db.');
+    const activeAdminChallenge = await AuthChallenge.findOne({
+      userId: adminOtpUser._id,
+      challengeIdHash: (await import('crypto')).createHash('sha256')
+        .update(firstFactorOnly.data.challengeId).digest('hex'),
+      purpose: 'LOGIN_OTP',
+      consumedAt: null,
+    });
+    if (!activeAdminChallenge) {
+      throw new Error('The OTP challenge returned by /auth/login was not persisted in securegate_test_db.');
+    }
+    await AuthChallenge.updateOne(
+      { _id: activeAdminChallenge._id },
+      { $set: { lastSentAt: new Date(Date.now() - 60 * 1000) } }
+    );
+    const otpResend = await api('/auth/login/resend-otp', {
+      method: 'POST',
+      body: JSON.stringify({ challengeId: firstFactorOnly.data.challengeId }),
+    });
+    const challengeAfterResend = await AuthChallenge.findById(activeAdminChallenge._id);
+    const resentFirstFactorMail = [...(globalThis.__securegateTestOutbox || [])]
+      .reverse()
+      .find((message) => message.purpose === 'LOGIN_OTP' && message.to === 'admin@securegate.io');
+    assert(
+      wrongOtpAttempt.status === 401 &&
+      otpResend.status === 200 &&
+      challengeAfterResend?.attempts === 1 &&
+      challengeAfterResend?.resends === 1,
+      'OTP resend preserves the cumulative failed-attempt count and records the resend'
+    );
+    const verifiedFactor = await api('/auth/login/verify-otp', {
+      method: 'POST',
+      body: JSON.stringify({
+        challengeId: firstFactorOnly.data.challengeId,
+        code: resentFirstFactorMail?.code,
+        deviceId: 'b'.repeat(64),
+        deviceName: 'MFA test device',
+        platform: 'Node.js test runner',
+      }),
+    });
+    assert(
+      verifiedFactor.status === 200 && !!verifiedFactor.data.token &&
+      verifiedFactor.data.user.role.name === 'Super Admin',
+      'A correct email OTP completes MFA and issues the authenticated session'
+    );
+
+    const replayedOtp = await api('/auth/login/verify-otp', {
+      method: 'POST',
+      body: JSON.stringify({
+        challengeId: firstFactorOnly.data.challengeId,
+        code: resentFirstFactorMail?.code,
+        deviceId: 'b'.repeat(64),
+        deviceName: 'MFA test device',
+        platform: 'Node.js test runner',
+      }),
+    });
+    assert(replayedOtp.status !== 200 && !replayedOtp.data.token, 'A previously consumed OTP cannot be replayed');
+
+    // Legacy tokens issued before MFA/device binding must stop authorizing requests.
+    const rootUserForLegacyCheck = await User.findOne({ email: 'admin@securegate.io' });
+    const legacyToken = jwt.sign({
+      id: rootUserForLegacyCheck._id,
+      email: rootUserForLegacyCheck.email,
+      tokenVersion: rootUserForLegacyCheck.tokenVersion,
+    }, process.env.JWT_SECRET, { expiresIn: '1h' });
+    const legacySession = await api('/auth/me', {
+      headers: { Authorization: `Bearer ${legacyToken}` },
+    });
+    assert(
+      legacySession.status === 401 && legacySession.data.message.toLowerCase().includes('mfa'),
+      'Pre-MFA sessions are rejected and users must complete the new authentication flow'
+    );
+
+    // IT Administrator may invite a standard employee but cannot appoint another administrator.
+    const invitedEmployeeEmail = 'mfa.invited@securegate.io';
+    const employeeInvitation = await api('/users', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${itToken}` },
+      body: JSON.stringify({
+        firstName: 'MFA',
+        lastName: 'Invite',
+        email: invitedEmployeeEmail,
+        roleId: empRole._id.toString(),
+        department: 'Engineering',
+        jobTitle: 'New Team Member',
+      }),
+    });
+    assert(
+      employeeInvitation.status === 201 &&
+      employeeInvitation.data.data.invitationPending === true &&
+      !employeeInvitation.data.temporaryPassword,
+      'IT Administrator creates a password-pending employee and no temporary password is returned'
+    );
+
+    const hrCannotInviteEmployee = await api('/users', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${hrToken}` },
+      body: JSON.stringify({
+        firstName: 'HR',
+        lastName: 'Unauthorized Invite',
+        email: 'hr.unauthorized.invite@securegate.io',
+        roleId: empRole._id.toString(),
+      }),
+    });
+    assert(
+      hrCannotInviteEmployee.status === 403,
+      'HR Manager cannot create even a standard employee account'
+    );
+
+    const invitationMail = [...(globalThis.__securegateTestOutbox || [])]
+      .reverse()
+      .find((message) => message.purpose === 'INVITATION' && message.to === invitedEmployeeEmail);
+    const invitationToken = invitationMail?.invitationUrl
+      ? new URL(invitationMail.invitationUrl).searchParams.get('token')
+      : null;
+
+    const acceptedInvitation = await api('/auth/invitations/accept', {
+      method: 'POST',
+      body: JSON.stringify({
+        token: invitationToken,
+        password: 'NewHire@2026',
+        confirmPassword: 'NewHire@2026',
+      }),
+    });
+    assert(acceptedInvitation.status === 200, 'Employee invitation verifies the mailbox and sets the employee password');
+
+    const replayedInvitation = await api('/auth/invitations/accept', {
+      method: 'POST',
+      body: JSON.stringify({
+        token: invitationToken,
+        password: 'NewHire@2026',
+        confirmPassword: 'NewHire@2026',
+      }),
+    });
+    assert(replayedInvitation.status === 400, 'An accepted employee invitation cannot be reused');
+
+    const invitedEmployeeLogin = await loginWithOtp({
+      method: 'POST',
+      body: JSON.stringify({ email: invitedEmployeeEmail, password: 'NewHire@2026' }),
+    });
+    assert(
+      invitedEmployeeLogin.status === 200 &&
+      invitedEmployeeLogin.data.user.role.name === 'Employee',
+      'An invited employee can sign in only after password setup and email OTP'
+    );
+
+    const invitedEmployeeDevices = await api('/devices', {
+      headers: { Authorization: `Bearer ${invitedEmployeeLogin.data.token}` },
+    });
+    const currentInvitedDevice = invitedEmployeeDevices.data?.data?.find((device) => device.isCurrentDevice);
+    assert(
+      invitedEmployeeDevices.status === 200 && !!currentInvitedDevice && currentInvitedDevice.status === 'Trusted',
+      'Successful MFA registers the browser as a trusted device'
+    );
+
+    const revokedDevice = await api(`/devices/${currentInvitedDevice?._id}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${invitedEmployeeLogin.data.token}` },
+    });
+    const revokedDeviceSession = await api('/auth/me', {
+      headers: { Authorization: `Bearer ${invitedEmployeeLogin.data.token}` },
+    });
+    assert(
+      revokedDevice.status === 200 && revokedDeviceSession.status === 401,
+      'Revoking a device immediately invalidates sessions bound to that device'
+    );
+
+    const revokedDeviceReauthentication = await loginWithOtp({
+      method: 'POST',
+      body: JSON.stringify({ email: invitedEmployeeEmail, password: 'NewHire@2026' }),
+    });
+    assert(
+      revokedDeviceReauthentication.status === 403 && !revokedDeviceReauthentication.data.token,
+      'A device identifier revoked by its owner cannot be automatically trusted again'
+    );
+
+    const itCannotAppointAdmin = await api('/users', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${itToken}` },
+      body: JSON.stringify({
+        firstName: 'Attempt',
+        lastName: 'Admin',
+        email: 'it.attempted.admin@securegate.io',
+        roleId: itAdminRole._id.toString(),
+      }),
+    });
+    assert(itCannotAppointAdmin.status === 403, 'IT Administrator cannot create or appoint another IT Administrator');
+
+    const saCannotCreateSecondRoot = await api('/users', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${superToken}` },
+      body: JSON.stringify({
+        firstName: 'Second',
+        lastName: 'Root',
+        email: 'second.superadmin@securegate.io',
+        roleId: superAdminRole._id.toString(),
+      }),
+    });
+    assert(saCannotCreateSecondRoot.status === 403, 'A second Super Admin cannot be created');
+
+    const itAdminTwo = await api('/users', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${superToken}` },
+      body: JSON.stringify({
+        firstName: 'IT',
+        lastName: 'Administrator Two',
+        email: 'it.admin.two@securegate.io',
+        roleId: itAdminRole._id.toString(),
+      }),
+    });
+    const itAdminThree = await api('/users', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${superToken}` },
+      body: JSON.stringify({
+        firstName: 'IT',
+        lastName: 'Administrator Three',
+        email: 'it.admin.three@securegate.io',
+        roleId: itAdminRole._id.toString(),
+      }),
+    });
+    const itAdminFour = await api('/users', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${superToken}` },
+      body: JSON.stringify({
+        firstName: 'IT',
+        lastName: 'Administrator Four',
+        email: 'it.admin.four@securegate.io',
+        roleId: itAdminRole._id.toString(),
+      }),
+    });
+    assert(
+      itAdminTwo.status === 201 && itAdminThree.status === 201 && itAdminFour.status === 409,
+      'Administrator seat governance allows at most three IT Administrators'
+    );
+
+    const legacyOverflowAdmin = new User({
+      firstName: 'Legacy',
+      lastName: 'Overflow Admin',
+      email: 'legacy.overflow.it@securegate.io',
+      password: 'LegacyOverflow@2026',
+      role: itAdminRole._id,
+      status: 'Active',
+    });
+    await legacyOverflowAdmin.save();
+    const legacyOverflowLogin = await api('/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({
+        email: 'legacy.overflow.it@securegate.io',
+        password: 'LegacyOverflow@2026',
+      }),
+    });
+    assert(
+      legacyOverflowLogin.status === 403 &&
+      String(legacyOverflowLogin.data.message || '').toLowerCase().includes('administrator seat'),
+      'Legacy excess IT Administrator records are preserved but cannot authenticate without a seat'
+    );
+
+    const rootDemotion = await api(`/users/${rootUserForLegacyCheck._id}`, {
+      method: 'PUT',
+      headers: { Authorization: `Bearer ${superToken}` },
+      body: JSON.stringify({ roleId: empRole._id.toString() }),
+    });
+    const rootDeletion = await api(`/users/${rootUserForLegacyCheck._id}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${superToken}` },
+    });
+    assert(
+      rootDemotion.status === 403 &&
+      String(rootDemotion.data?.message || '').toLowerCase().includes('sole super admin') &&
+      rootDeletion.status === 403 &&
+      String(rootDeletion.data?.message || '').toLowerCase().includes('sole super admin') &&
+      await User.exists({ _id: rootUserForLegacyCheck._id }),
+      'The sole Super Admin account cannot be demoted or deleted',
+      JSON.stringify({
+        demotionStatus: rootDemotion.status,
+        demotionResponse: rootDemotion.data,
+        deletionStatus: rootDeletion.status,
+        deletionResponse: rootDeletion.data,
+        rootAccountStillExists: Boolean(await User.exists({ _id: rootUserForLegacyCheck._id })),
+      })
+    );
+
     // Summary
     console.log('\n======================================================');
     console.log(` AUDIT RESULTS: ${passed} PASSED, ${failed} FAILED`);
@@ -453,9 +866,9 @@ async function runSecurityTests() {
     console.error('Test execution uncaught exception:', error);
     failed++;
   } finally {
-    if (localServer) {
-      await new Promise((resolve) => localServer.close(resolve));
-    }
+    await Promise.all(localServers.map((server) =>
+      new Promise((resolve) => server.close(resolve))
+    ));
     await mongoose.disconnect().catch(() => {});
     process.exitCode = failed === 0 ? 0 : 1;
   }

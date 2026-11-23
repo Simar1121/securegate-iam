@@ -70,7 +70,18 @@ export const Users = () => {
     status: 'Active',
   });
 
-  const canCreate = hasPermission('users:create');
+  const actorRoleName = currentUser?.role?.name;
+  const canCreate = ['Super Admin', 'IT Administrator'].includes(actorRoleName);
+  const assignableCreateRoles = roles.filter((role) => {
+    if (role.name === 'Super Admin') return false;
+    if (actorRoleName === 'Super Admin') return true;
+    return ['Employee', 'Security Auditor'].includes(role.name);
+  });
+  const assignableEditRoles = selectedUser?.role?.name === 'Super Admin'
+    ? roles.filter((role) => role.name === 'Super Admin')
+    : roles.filter((role) => role.name !== 'Super Admin' && (
+        actorRoleName === 'Super Admin' || ['Employee', 'Security Auditor'].includes(role.name)
+      ));
   const canUpdate = hasPermission('users:update');
   const canDelete = hasPermission('users:delete');
 
@@ -168,11 +179,7 @@ export const Users = () => {
     try {
       setActionLoading(true);
       const res = await userService.createUser(formData);
-      if (res.temporaryPassword) {
-        toast.success(`Employee created. One-time Temporary Password: ${res.temporaryPassword}`, 'Account Provisioned');
-      } else {
-        toast.success(res.message || 'Employee created successfully.');
-      }
+      toast.success(res.message || 'Invitation email sent successfully.');
       setIsAddModalOpen(false);
       fetchUsers();
     } catch (err) {
@@ -193,6 +200,19 @@ export const Users = () => {
       fetchUsers();
     } catch (err) {
       toast.error(err.response?.data?.message || 'Failed to update employee.');
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleResendInvitation = async () => {
+    if (!selectedUser?._id) return;
+    try {
+      setActionLoading(true);
+      const result = await userService.resendInvitation(selectedUser._id);
+      toast.success(result.message || 'A new invitation email has been sent.');
+    } catch (err) {
+      toast.error(err.response?.data?.message || 'Unable to resend invitation.');
     } finally {
       setActionLoading(false);
     }
@@ -541,7 +561,7 @@ export const Users = () => {
                     required
                     className="w-full mt-1 bg-charcoal-950 border border-charcoal-800 rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-violet-500"
                   >
-                    {roles.map((r) => (
+                    {assignableCreateRoles.map((r) => (
                       <option key={r._id} value={r._id}>
                         {r.name}
                       </option>
@@ -597,17 +617,9 @@ export const Users = () => {
                 </div>
               </div>
 
-              <div>
-                <label className="block text-[11px] font-semibold uppercase text-slate-400 tracking-wider">
-                  Initial Password (Optional — leave empty to generate secure temporary password)
-                </label>
-                <input
-                  type="password"
-                  value={formData.password}
-                  onChange={(e) => setFormData({ ...formData, password: e.target.value })}
-                  placeholder="Min 8 chars with upper, lower, number & symbol (or leave empty)"
-                  className="w-full mt-1 bg-charcoal-950 border border-charcoal-800 rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-violet-500"
-                />
+              <div className="rounded-lg border border-violet-500/20 bg-violet-500/5 px-4 py-3">
+                <p className="text-xs font-semibold text-violet-200">Secure email invitation</p>
+                <p className="mt-1 text-[11px] leading-relaxed text-slate-400">SecureGate will email a one-time invitation link. The employee verifies their mailbox and creates their own password. The link expires after 24 hours.</p>
               </div>
 
               <div className="pt-4 border-t border-charcoal-800 flex justify-end gap-3">
@@ -697,7 +709,7 @@ export const Users = () => {
                     onChange={(e) => setFormData({ ...formData, roleId: e.target.value })}
                     className="w-full mt-1 bg-charcoal-950 border border-charcoal-800 rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-violet-500"
                   >
-                    {roles.map((r) => (
+                    {assignableEditRoles.map((r) => (
                       <option key={r._id} value={r._id}>
                         {r.name}
                       </option>
@@ -766,7 +778,17 @@ export const Users = () => {
                 />
               </div>
 
-              <div className="pt-4 border-t border-charcoal-800 flex justify-end gap-3">
+              <div className="pt-4 border-t border-charcoal-800 flex flex-wrap justify-end gap-3">
+                {selectedUser?.invitationPending && (
+                  <button
+                    type="button"
+                    onClick={handleResendInvitation}
+                    disabled={actionLoading}
+                    className="px-4 py-2 rounded-lg border border-violet-500/30 text-xs font-semibold text-violet-300 hover:bg-violet-500/10 disabled:opacity-50"
+                  >
+                    {actionLoading ? 'Sending...' : 'Resend Invitation'}
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => setIsEditModalOpen(false)}

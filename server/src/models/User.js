@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
+import crypto from 'crypto';
 
 const userSchema = new mongoose.Schema(
   {
@@ -29,10 +30,12 @@ const userSchema = new mongoose.Schema(
     },
     password: {
       type: String,
-      required: [true, 'Password is required'],
+      required: function passwordRequired() { return !this.invitationPending; },
       minlength: [6, 'Password must be at least 6 characters long'],
       select: false, // Never return password hash by default
     },
+    invitationPending: { type: Boolean, default: false, index: true },
+    emailVerifiedAt: { type: Date, default: null },
     employeeId: {
       type: String,
       unique: true,
@@ -123,7 +126,7 @@ userSchema.pre('save', async function (next) {
     this.employeeId = `SEC-${randomNum}`;
   }
 
-  if (!this.isModified('password')) {
+  if (!this.isModified('password') || !this.password) {
     return next();
   }
 
@@ -142,18 +145,25 @@ userSchema.methods.matchPassword = async function (enteredPassword) {
 };
 
 // Method: Generate JWT token
-userSchema.methods.generateAuthToken = function () {
+userSchema.methods.generateAuthToken = function (deviceIdHash) {
   const secret = process.env.JWT_SECRET;
   if (!secret || secret.trim().length < 32) {
     throw new Error('FATAL SECURITY ERROR: JWT_SECRET environment variable is missing or insecure (must be at least 32 characters).');
   }
 
+  if (typeof deviceIdHash !== 'string' || !/^[a-f0-9]{64}$/i.test(deviceIdHash)) {
+    throw new Error('A trusted device binding is required before issuing an access token.');
+  }
+
   return jwt.sign(
     {
       id: this._id,
+      jti: crypto.randomUUID(),
       email: this.email,
       role: this.role,
       tokenVersion: this.tokenVersion || 0,
+      mfaVerified: true,
+      deviceIdHash,
     },
     secret,
     {
