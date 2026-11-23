@@ -82,6 +82,12 @@ EOF
             }
         }
 
+        stage('Check Docker Hub registry connectivity') {
+            steps {
+                sh '''docker run --rm --network host node:22-bookworm-slim node -e "require('dns').lookup('registry-1.docker.io', (err, address) => { if (err) { console.error('Docker Hub DNS failed:', err.code); process.exit(1); return; } console.log('Docker Hub DNS OK:', address); fetch('https://registry-1.docker.io/v2/').then(r => { console.log('Docker Hub registry HTTP:', r.status); process.exit(r.status === 401 || r.ok ? 0 : 1); }).catch(err => { console.error('Docker Hub HTTPS failed:', err.cause || err); process.exit(1); }); });"'''
+            }
+        }
+
         stage('Prepare BuildKit host networking') {
             steps {
                 sh '''
