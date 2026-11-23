@@ -16,6 +16,9 @@ services:
     environment:
       DOCKER_TLS_CERTDIR: /certs
     volumes:
+      # Avoid relying on Docker Desktop's embedded 127.0.0.11 resolver
+      # for registry pulls made by the DinD daemon itself.
+      - ./jenkins/dind-resolv.conf:/etc/resolv.conf:ro
       - jenkins-docker-certs:/certs/client
       - jenkins-docker-data:/var/lib/docker
     networks:
