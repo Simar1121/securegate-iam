@@ -5,20 +5,11 @@ services:
     image: docker:28-dind
     privileged: true
     restart: unless-stopped
-    # Give the DinD container working upstream resolvers. The dockerd flags
-    # below also pass these resolvers to containers created by this daemon.
-    dns:
-      - 1.1.1.1
-      - 8.8.8.8
-    command:
-      - --dns=1.1.1.1
-      - --dns=8.8.8.8
+    # Use Docker Desktop's DNS forwarding. Public DNS endpoints
+    # are not directly reachable from every nested container network.
     environment:
       DOCKER_TLS_CERTDIR: /certs
     volumes:
-      # Avoid relying on Docker Desktop's embedded 127.0.0.11 resolver
-      # for registry pulls made by the DinD daemon itself.
-      - ./jenkins/dind-resolv.conf:/etc/resolv.conf:ro
       - jenkins-docker-certs:/certs/client
       - jenkins-docker-data:/var/lib/docker
     networks:
