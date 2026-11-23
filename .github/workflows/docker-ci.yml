@@ -5,6 +5,7 @@ on:
     branches:
       - develop
       - feature/secure-onboarding-2fa
+      - chore/zero-trust-hardening
   pull_request:
     branches:
       - develop
