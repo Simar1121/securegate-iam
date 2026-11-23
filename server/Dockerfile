@@ -37,5 +37,6 @@ CMD ["node", "src/server.js"]
 FROM base AS test
 
 COPY --chown=node:node testSecurityAudit.js ./testSecurityAudit.js
+COPY --chown=node:node test ./test
 USER node
 CMD ["npm", "test"]
