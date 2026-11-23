@@ -62,6 +62,12 @@ EOF
             }
         }
 
+        stage('Check npm registry connectivity') {
+            steps {
+                sh '''docker run --rm node:22-bookworm-slim node -e "fetch('https://registry.npmjs.org/npm').then(r => { console.log('npm registry HTTP ' + r.status); process.exit(r.ok ? 0 : 1); }).catch(err => { console.error('Cannot reach npm registry:', err.cause || err); process.exit(1); });"'''
+            }
+        }
+
         stage('Build backend test image') {
             steps {
                 sh 'docker compose -f docker-compose.yml -f .jenkins-ci-compose.yml --profile test build backend-test'
