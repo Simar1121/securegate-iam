@@ -41,6 +41,26 @@ volumes:
     name: securegate_jenkins_ci_${CI_VOLUME_SUFFIX:?CI_VOLUME_SUFFIX is required}
 EOF
 
+                    # Keep this workaround limited to CI image-build RUN steps.
+                    cat > .jenkins-ci-build-network.yml <<'EOF'
+services:
+  backend-test:
+    build:
+      network: host
+      entitlements:
+        - network.host
+  backend:
+    build:
+      network: host
+      entitlements:
+        - network.host
+  frontend:
+    build:
+      network: host
+      entitlements:
+        - network.host
+EOF
+
                     cat > server/.env <<EOF
 PORT=5000
 NODE_ENV=test
@@ -58,19 +78,37 @@ EOF
 
         stage('Validate Compose configuration') {
             steps {
-                sh 'docker compose -f docker-compose.yml -f .jenkins-ci-compose.yml config --quiet'
+                sh 'docker compose -f docker-compose.yml -f .jenkins-ci-compose.yml -f .jenkins-ci-build-network.yml config --quiet'
+            }
+        }
+
+        stage('Prepare BuildKit host networking') {
+            steps {
+                sh '''
+                    if ! docker buildx inspect securegate-ci >/dev/null 2>&1; then
+                        docker buildx create \
+                            --name securegate-ci \
+                            --driver docker-container \
+                            --driver-opt network=host \
+                            --buildkitd-flags '--allow-insecure-entitlement network.host' \
+                            --use
+                    else
+                        docker buildx use securegate-ci
+                    fi
+                    docker buildx inspect --bootstrap
+                '''
             }
         }
 
         stage('Check npm registry connectivity') {
             steps {
-                sh '''docker run --rm node:22-bookworm-slim node -e "fetch('https://registry.npmjs.org/npm').then(r => { console.log('npm registry HTTP ' + r.status); process.exit(r.ok ? 0 : 1); }).catch(err => { console.error('Cannot reach npm registry:', err.cause || err); process.exit(1); });"'''
+                sh '''docker run --rm --network host node:22-bookworm-slim node -e "fetch('https://registry.npmjs.org/npm').then(r => { console.log('npm registry HTTP ' + r.status); process.exit(r.ok ? 0 : 1); }).catch(err => { console.error('Cannot reach npm registry:', err.cause || err); process.exit(1); });"'''
             }
         }
 
         stage('Build backend test image') {
             steps {
-                sh 'docker compose -f docker-compose.yml -f .jenkins-ci-compose.yml --profile test build backend-test'
+                sh 'docker compose -f docker-compose.yml -f .jenkins-ci-compose.yml -f .jenkins-ci-build-network.yml --profile test build backend-test'
             }
         }
 
@@ -88,7 +126,7 @@ EOF
 
         stage('Build production backend and frontend') {
             steps {
-                sh 'docker compose -f docker-compose.yml -f .jenkins-ci-compose.yml build backend frontend'
+                sh 'docker compose -f docker-compose.yml -f .jenkins-ci-compose.yml -f .jenkins-ci-build-network.yml build backend frontend'
             }
         }
     }
@@ -98,7 +136,7 @@ EOF
             sh '''
                 set +x
                 docker compose -f docker-compose.yml -f .jenkins-ci-compose.yml down --volumes --remove-orphans || true
-                rm -f .env server/.env .jenkins-ci-compose.yml
+                rm -f .env server/.env .jenkins-ci-compose.yml .jenkins-ci-build-network.yml
             '''
         }
         success {
