@@ -5,6 +5,14 @@ services:
     image: docker:28-dind
     privileged: true
     restart: unless-stopped
+    # Give the DinD container working upstream resolvers. The dockerd flags
+    # below also pass these resolvers to containers created by this daemon.
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    command:
+      - --dns=1.1.1.1
+      - --dns=8.8.8.8
     environment:
       DOCKER_TLS_CERTDIR: /certs
     volumes:
