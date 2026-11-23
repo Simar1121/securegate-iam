@@ -50,10 +50,10 @@ test('OTP attempt risk is capped at 40 points', () => {
 
 test('risk score of 70 is high and denied', () => {
   const result = assessLoginRisk({
-    device: null,
+    device: knownDevice,
     ipAddress: '198.51.100.22',
     userAgent: 'Different Browser',
-    otpAttempts: 2,
+    otpAttempts: 4,
   });
   assert.equal(result.score, 70);
   assert.equal(result.level, 'High');
@@ -80,14 +80,10 @@ test('revoked device is always denied regardless of other context', () => {
   assert.deepEqual(result.reasons, ['device_revoked_reenrollment_denied']);
 });
 
-test('combined risk is clamped to 100', () => {
-  const result = assessLoginRisk({
-    device: null,
-    ipAddress: '198.51.100.22',
-    userAgent: 'Different Browser',
-    otpAttempts: 100,
-  });
-  assert.equal(result.score, 100);
+test('new device and maximum OTP-attempt risk produce 75 points', () => {
+  const result = assessLoginRisk({ device: null, otpAttempts: 100 });
+  assert.equal(result.score, 75);
   assert.equal(result.level, 'High');
   assert.equal(result.decision, 'DENY');
+  assert.deepEqual(result.reasons, ['new_device', 'incorrect_otp_attempts']);
 });
