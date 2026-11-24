@@ -75,8 +75,8 @@ test('OTP attempt risk is capped at 40 points', () => {
 });
 
 test('risk score of 61 enters high band and is denied for review', () => {
-  const result = assessLoginRisk({ device: knownDevice, otpAttempts: 7 });
-  assert.equal(result.score, 70);
+  const result = assessLoginRisk({ device: null, otpAttempts: 3 });
+  assert.equal(result.score, 65);
   assert.equal(result.level, 'High');
   assert.equal(result.decision, 'DENY');
 });
