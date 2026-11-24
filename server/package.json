@@ -8,7 +8,7 @@
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
     "test": "npm run test:risk && npm run test:abac && node testSecurityAudit.js",
-    "test:risk": "node --test test/riskEngine.test.js",
+    "test:risk": "node --test test/riskEngine.test.js test/riskAssessmentService.test.js",
     "test:abac": "node --test test/abacPolicyEngine.test.js test/abacPolicyValidation.test.js test/deviceAbacMiddleware.test.js test/deviceController.test.js"
   },
   "dependencies": {
