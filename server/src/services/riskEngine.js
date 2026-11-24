@@ -62,7 +62,7 @@ export const assessLoginRisk = ({ device, ipAddress, userAgent, otpAttempts = 0 
     // Backward-compatible enforcement: do not change login outcomes in this
     // classification-only slice. A separately approved policy migration must
     // wire recommendedAction to MFA/review/incident workflows.
-    decision: score >= 70 ? 'DENY' : 'ALLOW',
+    decision: classification.level === 'High' || classification.level === 'Critical' ? 'DENY' : 'ALLOW',
     reasons: reasons.length ? reasons : ['known_device_and_stable_context'],
   };
 };
