@@ -1,7 +1,7 @@
 # SecureGate Engineering Roadmap and Security Decision Register
 
 **Branch:** `chore/zero-trust-hardening`  
-**Baseline:** `95171ce28b87d1e349df0932229778a4f496f6e9`  
+**Baseline:** `f071a3f6284bcc1b278b9df81001166ca834568c` (risk-test baseline); ABAC work is layered on the same hardening branch.  
 **Purpose:** Track implementation evidence and prevent the academic specification from overstating the running system.
 
 ## Delivered in this branch
@@ -12,7 +12,7 @@
 - Integrated risk unit tests into the existing backend `npm test` command so the Docker CI test runner executes them before the destructive integration suite.
 - The integration suite retains its dedicated test-database name guard. Do not point it at the organization database.
 
-## Current security behaviour (source-verified)
+## Delivered in this branch — ABAC foundation\n\n- Added a versioned `AbacPolicy` MongoDB model with enabled state, priority, effect, action/resource matching, conditions, and creator/updater references.\n- Added an allowlisted attribute vocabulary and typed comparison operators; missing/unknown attributes do not satisfy a condition.\n- Added deny-overrides policy evaluation and explicit `NOT_APPLICABLE` results. A non-match does not grant access: current RBAC middleware remains authoritative.\n- Added Super Admin-only policy CRUD and a simulation endpoint at `/api/abac-policies`; simulation does not mutate active policies or grant access.\n- Added eight deterministic ABAC unit tests and included them in the backend `npm test` sequence.\n- **Not yet delivered:** ABAC enforcement on business routes, policy publish/draft workflow, approval, and scenario UI. Do not describe the current release as fully ABAC-enforced.\n\n## Current security behaviour (source-verified)
 
 | Area | Current behaviour | Engineering note |
 |---|---|---|
