@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
 import Alert from '../models/Alert.js';
 import Incident from '../models/Incident.js';
+import { logAudit } from '../services/auditService.js';
 
 const allowedAlertStatuses = new Set(['Open', 'Acknowledged', 'Resolved']);
 const allowedIncidentStatuses = new Set(['Open', 'Investigating', 'Contained', 'Resolved']);
@@ -26,6 +27,12 @@ export const updateAlert = async (req, res) => {
     if (!allowedAlertStatuses.has(status)) return res.status(400).json({ success: false, message: 'Unsupported alert status.' });
     const alert = await Alert.findByIdAndUpdate(req.params.id, { $set: { status } }, { new: true, runValidators: true });
     if (!alert) return res.status(404).json({ success: false, message: 'Alert not found.' });
+    await logAudit({
+      req, action: 'SECURITY_ALERT_STATUS_UPDATED', category: 'SECURITY',
+      actor: req.user._id, actorEmail: req.user.email, actorName: req.user.fullName,
+      actorRole: req.user.role?.name || 'User', targetType: 'System', targetId: alert._id,
+      targetName: alert.title, status: 'SUCCESS', details: { newStatus: alert.status },
+    });
     return res.json({ success: true, data: alert });
   } catch (error) {
     console.error('[Update Security Alert Error]:', error.message);
@@ -55,6 +62,13 @@ export const updateIncident = async (req, res) => {
     if (resolutionNotes !== undefined) update.resolutionNotes = resolutionNotes;
     const incident = await Incident.findByIdAndUpdate(req.params.id, { $set: update }, { new: true, runValidators: true });
     if (!incident) return res.status(404).json({ success: false, message: 'Incident not found.' });
+    await logAudit({
+      req, action: 'SECURITY_INCIDENT_UPDATED', category: 'SECURITY',
+      actor: req.user._id, actorEmail: req.user.email, actorName: req.user.fullName,
+      actorRole: req.user.role?.name || 'User', targetType: 'System', targetId: incident._id,
+      targetName: incident.title, status: 'SUCCESS',
+      details: { newStatus: incident.status, resolutionNotesProvided: resolutionNotes !== undefined },
+    });
     return res.json({ success: true, data: incident });
   } catch (error) {
     console.error('[Update Security Incident Error]:', error.message);
