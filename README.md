@@ -115,6 +115,46 @@ The application records security-relevant activities, including:
 
 Sensitive credentials and authentication tokens must never be stored in audit event details.
 
+### 3.8 Attribute-Based Access Control (ABAC)
+
+SecureGate now includes an ABAC policy foundation alongside RBAC. RBAC remains the prerequisite authorization gate; ABAC adds contextual deny rules and cannot independently grant access.
+
+- Policies define an effect (PERMIT or DENY), action patterns, resource types, conditions, priority and enabled state.
+- Supported attributes are allowlisted across subject, device, resource and request context. Unsupported or missing attributes do not satisfy a condition.
+- A matching DENY overrides a matching PERMIT.
+- A policy non-match returns NOT_APPLICABLE; it does not bypass existing RBAC.
+- User-management routes apply ABAC deny checks after their existing RBAC checks.
+- Policy administration and simulation are restricted to the active Super Admin.
+
+**Policy API (all routes require an authenticated Super Admin):**
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| GET | `/api/abac-policies` | List policies and supported attributes |
+| POST | `/api/abac-policies` | Create a policy |
+| PUT | `/api/abac-policies/:id` | Update a policy (increments version) |
+| DELETE | `/api/abac-policies/:id` | Delete a policy |
+| POST | `/api/abac-policies/simulate` | Evaluate a scenario without changing policy state |
+
+Example policy body:
+
+```json
+{
+  "name": "Block low-trust device user changes",
+  "description": "Require a stronger device trust score for user updates.",
+  "effect": "DENY",
+  "actions": ["users:update"],
+  "resourceTypes": ["User"],
+  "conditions": [
+    { "attribute": "device.trustScore", "operator": "lt", "value": 60 }
+  ],
+  "priority": 100,
+  "enabled": true
+}
+```
+
+The policy engine currently supports `eq`, `neq`, `in`, `not_in`, `contains`, `gt`, `gte`, `lt` and `lte`. The current version counter increments on update; immutable policy history, draft/publish approvals, UI administration and broader route coverage remain future work.
+
 ### 3.7 Administrative Dashboard
 The dashboard is intended to display database-driven information:
 
