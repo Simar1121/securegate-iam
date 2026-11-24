@@ -34,7 +34,7 @@
 | Administrator governance | One-time first Super Admin; sole-Super-Admin protection; maximum three IT Administrators. | Maintain invariant tests around every user/role/status mutation. |
 | Authorization | RBAC role-to-permission middleware. | Build a route-to-permission matrix and negative tests for every privileged route. |
 | Device trust | Hashed browser/device identifier with Trusted/Revoked/Blocked state. | Application-level identifier is not hardware attestation. |
-| Risk scoring | New device +35; changed IP +15; changed user-agent +15; OTP failures +10 each capped +40; blocked/revoked = 100. | Current levels: Low <30, Medium 30–69, High >=70; deny >=70. |
+| Risk scoring | New device +35; changed IP +15; changed user-agent +15; OTP failures +10 each capped +40; blocked/revoked = 100. | Assessment now classifies Low 0–30, Medium 31–60, High 61–80, Critical 81–100 and emits recommended actions. Login enforcement intentionally remains backward-compatible at deny >=70 until MFA/review/incident workflows and thresholds are approved. |
 | Audit | Actor/action/target/outcome/context event records. | Current schema does not prove tamper-evident hash chaining. |
 
 ## Priority 0 — release safety
@@ -94,3 +94,12 @@ A hash chain alone does not protect against an attacker who can rewrite the enti
 - Existing email OTP, token-version/revocation checks, device binding, RBAC and selective deny-only ABAC are real capabilities, but they do not by themselves satisfy TOTP, rotating refresh tokens, universal ABAC or the complete campus target.
 - The traceability document marks items Partial/Missing/Not Verified where evidence is incomplete. It is an initial static review, not a full runtime audit.
 - Do not change role mappings, risk thresholds, session lifetime/schema or audit failure semantics until the submitted SRS/SDD baseline and migration approach are confirmed by the team/faculty.
+
+
+## Four-band risk classification — 24 November 2026
+
+- Added `classifyRiskScore` in `server/src/services/riskEngine.js` using the submitted SRS boundaries: Low 0–30, Medium 31–60, High 61–80, Critical 81–100.
+- The assessment emits recommended actions: ALLOW, REQUIRE_MFA, DENY_OR_ADMIN_REVIEW and DENY_AND_ALERT.
+- Added boundary tests for 0, 30, 31, 60, 61, 80, 81 and 100, plus score clamping and risk-signal regression coverage.
+- **Enforcement deliberately unchanged:** `assessLoginRisk().decision` retains the existing deny-at-70 behaviour. The current login flow already completes email OTP before risk assessment; this change does not claim to implement step-up MFA, administrator review or incident alert workflows. Those require a separate approved design and integration slice.
+- Do not interpret `recommendedAction` as an enforced action until those workflows are implemented and tested.
