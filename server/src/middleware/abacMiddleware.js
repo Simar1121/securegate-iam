@@ -6,6 +6,9 @@ import { evaluateAbac } from '../services/abacPolicyEngine.js';
 export const requireAbac = (action, resourceType, getResource = () => ({})) => async (req, res, next) => {
   try {
     const policies = await AbacPolicy.find({ enabled: true }).lean();
+    // Resource attributes may require an authoritative database lookup. Await the
+    // resolver so callers cannot accidentally pass an unresolved Promise as context.
+    const resourceAttributes = await getResource(req);
     const result = evaluateAbac({
       policies,
       subject: {
@@ -18,7 +21,7 @@ export const requireAbac = (action, resourceType, getResource = () => ({})) => a
         status: req.device?.status,
         platform: req.device?.platform
       },
-      resource: { type: resourceType, ...(getResource(req) || {}) },
+      resource: { type: resourceType, ...(resourceAttributes || {}) },
       context: {
         riskScore: req.device?.lastRiskScore,
         ipAddress: req.ip
