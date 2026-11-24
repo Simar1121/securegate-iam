@@ -123,3 +123,20 @@ This is an initial static source review, not a full runtime audit. Before markin
 - Verify every SRS requirement ID, including requirements not yet individually enumerated above.
 - Confirm no uninspected model/route or external service implements a listed capability.
 - Review migration and rollback plans before any schema/session/role change.
+
+
+## Risk escalation implementation update — 24 November 2026
+
+The risk engine has progressed beyond classification-only work:
+
+- `classifyRiskScore` implements Low 0–30, Medium 31–60, High 61–80, Critical 81–100.
+- High and Critical now produce an enforcement DENY. Medium retains `REQUIRE_MFA` as the recommended action but does not yet run a separate risk-triggered TOTP/step-up challenge; email OTP is completed earlier in the current login sequence.
+- `RiskEvent`, `Alert` and `Incident` Mongoose models persist assessments and escalation records.
+- Each login assessment is recorded before access-token issuance. High creates an Open review alert. Critical creates an Open alert and linked Open incident. A persistence failure propagates to the login handler and prevents token issuance.
+- `GET /api/security/alerts`, `PATCH /api/security/alerts/:id`, `GET /api/security/incidents`, and `PATCH /api/security/incidents/:id` provide authenticated review/status operations. Reads are limited to Super Admin, IT Administrator and Security Auditor; updates to Super Admin and IT Administrator. Status changes are audit logged.
+- Device model now accepts the Critical risk level.
+
+### Updated status
+- FR-RISK-01, FR-RISK-03, FR-RISK-04, FR-RISK-05, FR-RISK-08: **Partial, improved**. Score classification, contributing reasons, persistence, band-specific High/Critical denial and escalation are implemented. Medium-band step-up MFA is not implemented; risk weights/configuration and separate failed-login-per-IP signals are not implemented.
+- Alert/incident lifecycle: **Partial**. Persistence and status APIs exist; assignment, notifications, complete Security Officer role access and a full frontend workflow are not yet evidenced.
+- Latest CI must pass on the current branch head before this update is treated as validated runtime evidence.
