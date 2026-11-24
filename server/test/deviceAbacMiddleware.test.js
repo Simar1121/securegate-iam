@@ -10,17 +10,25 @@ const makeResponse = () => ({
   json(body) { this.body = body; return this; },
 });
 
-const makeMiddleware = ({ decision = 'NOT_APPLICABLE', resolver = async () => ({}) } = {}) => {
-  const calls = { evaluate: null, next: 0 };
-  const PolicyModel = { find: () => ({ lean: async () => [{ id: 'policy-1' }] }) };
+const makeMiddleware = ({
+  decision = 'NOT_APPLICABLE',
+  resolver = async () => ({}),
+  action = 'devices:revoke',
+  PolicyModel = { find: () => ({ lean: async () => [{ id: 'policy-1' }] }) },
+  evaluate = (input) => ({ decision, policyId: 'policy-1' }),
+} = {}) => {
+  const calls = { evaluate: null };
   const middleware = createRequireAbac({
     PolicyModel,
-    evaluate: (input) => { calls.evaluate = input; return { decision, policyId: 'policy-1' }; },
-  })('devices:revoke', 'Device', resolver);
+    evaluate: (input) => {
+      calls.evaluate = input;
+      return evaluate(input);
+    },
+  })(action, 'Device', resolver);
   return { middleware, calls };
 };
 
-test('awaits the resource resolver and continues on NOT_APPLICABLE', async () => {
+test('awaits the revoke resource resolver and continues on NOT_APPLICABLE', async () => {
   const ownerId = 'user-123';
   const { middleware, calls } = makeMiddleware({ resolver: async () => {
     await Promise.resolve();
@@ -38,6 +46,24 @@ test('awaits the resource resolver and continues on NOT_APPLICABLE', async () =>
   assert.equal(req.abacDecision.decision, 'NOT_APPLICABLE');
 });
 
+test('evaluates the device-list action and continues on NOT_APPLICABLE', async () => {
+  const ownerId = 'user-123';
+  const { middleware, calls } = makeMiddleware({
+    action: 'devices:read',
+    resolver: async (req) => ({ ownerId: req.user._id }),
+  });
+  const req = { user: { _id: ownerId, role: { name: 'Employee' } }, ip: '127.0.0.1' };
+  const res = makeResponse();
+  let nextCount = 0;
+  await middleware(req, res, () => { nextCount += 1; });
+
+  assert.equal(calls.evaluate.action, 'devices:read');
+  assert.equal(calls.evaluate.resource.type, 'Device');
+  assert.equal(calls.evaluate.resource.ownerId, ownerId);
+  assert.equal(req.abacDecision.decision, 'NOT_APPLICABLE');
+  assert.equal(nextCount, 1);
+});
+
 test('blocks a matching DENY policy with 403', async () => {
   const { middleware } = makeMiddleware({ decision: 'DENY' });
   const res = makeResponse();
@@ -49,8 +75,44 @@ test('blocks a matching DENY policy with 403', async () => {
   assert.equal(nextCount, 0);
 });
 
-test('fails closed with 503 when resource resolution or policy evaluation fails', async () => {
+test('fails closed with 503 when resource resolution fails', async () => {
   const { middleware } = makeMiddleware({ resolver: async () => { throw new Error('database unavailable'); } });
+  const res = makeResponse();
+  let nextCount = 0;
+  const originalError = console.error;
+  console.error = () => {};
+  try {
+    await middleware({ user: {}, params: {}, ip: '127.0.0.1' }, res, () => { nextCount += 1; });
+  } finally {
+    console.error = originalError;
+  }
+
+  assert.equal(res.statusCode, 503);
+  assert.equal(nextCount, 0);
+});
+
+test('fails closed with 503 when policy evaluation throws', async () => {
+  const { middleware } = makeMiddleware({
+    evaluate: () => { throw new Error('policy engine unavailable'); },
+  });
+  const res = makeResponse();
+  let nextCount = 0;
+  const originalError = console.error;
+  console.error = () => {};
+  try {
+    await middleware({ user: {}, params: {}, ip: '127.0.0.1' }, res, () => { nextCount += 1; });
+  } finally {
+    console.error = originalError;
+  }
+
+  assert.equal(res.statusCode, 503);
+  assert.equal(nextCount, 0);
+});
+
+test('fails closed with 503 when enabled policies cannot be loaded', async () => {
+  const { middleware } = makeMiddleware({
+    PolicyModel: { find: () => ({ lean: async () => { throw new Error('policy store unavailable'); } }) },
+  });
   const res = makeResponse();
   let nextCount = 0;
   const originalError = console.error;
