@@ -147,7 +147,7 @@ export const protect = async (req, res, next) => {
       userId: user._id,
       deviceIdHash: decoded.deviceIdHash,
       status: 'Trusted',
-    }).select('_id deviceName trustScore lastRiskScore status');
+    }).select('_id deviceName platform trustScore lastRiskScore status');
     if (!trustedDevice) {
       return res.status(401).json({
         success: false,
