@@ -74,6 +74,13 @@ test('OTP attempt risk is capped at 40 points', () => {
   assert.deepEqual(result.reasons, ['incorrect_otp_attempts']);
 });
 
+test('risk score of 61 enters high band and is denied for review', () => {
+  const result = assessLoginRisk({ device: knownDevice, otpAttempts: 7 });
+  assert.equal(result.score, 70);
+  assert.equal(result.level, 'High');
+  assert.equal(result.decision, 'DENY');
+});
+
 test('risk score of 70 is high and remains denied by current enforcement', () => {
   const result = assessLoginRisk({
     device: knownDevice,
