@@ -348,3 +348,16 @@ Each build generates fresh random MongoDB and JWT secrets in temporary, permissi
 The pipeline creates a unique MongoDB volume for each build by using a temporary Compose override. Cleanup removes only that build's disposable test volume; it does not touch the persistent volume used by the regular local SecureGate Docker stack. Temporary environment files are removed after the build.
 
 Jenkins uses a separate, TLS-protected Docker-in-Docker engine. Its web interface is bound to 127.0.0.1:8081; the Docker daemon is not published to the Windows host. The DinD service inherits Docker Desktop's DNS forwarding rather than hard-coding public DNS servers, which may be unreachable from nested containers on some networks. The pipeline creates a dedicated BuildKit builder using the DinD host network and grants the `network.host` build entitlement only to image-build steps. It first stores the DinD TLS endpoint in a named Docker context so Buildx can create its builder with the mounted client certificates, then checks Docker Hub and npm registry connectivity before their respective image pulls and dependency installs. Jenkins data is retained in dedicated Docker volumes.
+
+
+### ABAC enforcement scope
+
+ABAC is an additional deny-only policy gate after authentication and the existing RBAC/role checks. A matching DENY blocks a request; a PERMIT or no matching policy does not grant permissions that RBAC has not already granted.
+
+Current route coverage includes user-management endpoints and authenticated self-service device endpoints:
+- Device list: `devices:read` on resource type `Device`.
+- Device revocation: `devices:revoke` on resource type `Device`.
+
+Device revocation resolves the target device from MongoDB using both the requested device ID and the authenticated user's ID before supplying resource ownership attributes to ABAC. Invalid, foreign, or nonexistent IDs are not treated as owned resources; the controller retains its validation and not-found responses. ABAC resource resolvers may be asynchronous so resource attributes can come from authoritative server-side records.
+
+This remains partial route coverage, not universal API enforcement. Policy evaluation errors fail closed with HTTP 503. The simulator accepts hypothetical inputs and is not an authorization bypass.
