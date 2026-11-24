@@ -12,7 +12,20 @@
 - Integrated risk unit tests into the existing backend `npm test` command so the Docker CI test runner executes them before the destructive integration suite.
 - The integration suite retains its dedicated test-database name guard. Do not point it at the organization database.
 
-## Delivered in this branch — ABAC foundation\n\n- Added a versioned `AbacPolicy` MongoDB model with enabled state, priority, effect, action/resource matching, conditions, and creator/updater references.\n- Added an allowlisted attribute vocabulary and typed comparison operators; missing/unknown attributes do not satisfy a condition.\n- Added deny-overrides policy evaluation and explicit `NOT_APPLICABLE` results. A non-match does not grant access: current RBAC middleware remains authoritative.\n- Added Super Admin-only policy CRUD and a simulation endpoint at `/api/abac-policies`; simulation does not mutate active policies or grant access.\n- Added eight deterministic ABAC unit tests and included them in the backend `npm test` sequence.\n- Added a deny-overrides ABAC middleware to user-management routes (read, create, update, delete, status change, and invitation resend). RBAC remains the prerequisite; ABAC can add a deny but cannot grant access by itself.\n- Extended ABAC to authenticated self-service device list and revoke routes using `devices:read` and `devices:revoke`. Device revoke resource ownership is resolved from MongoDB using both target ID and authenticated user ID; caller-supplied owner identifiers are not trusted.\n- ABAC middleware now awaits asynchronous resource resolvers so resource attributes can be populated from authoritative server-side records.\n- **Not yet delivered:** policy publish/draft workflow, immutable historical snapshots, approval, broader route coverage, and scenario UI. Do not describe ABAC as universally enforced across every API.\n\n## Current security behaviour (source-verified)
+## Delivered in this branch — ABAC foundation
+
+- Added a versioned `AbacPolicy` MongoDB model with enabled state, priority, effect, action/resource matching, conditions, and creator/updater references.
+- Added an allowlisted attribute vocabulary and typed comparison operators; missing/unknown attributes do not satisfy a condition.
+- Added deny-overrides policy evaluation and explicit `NOT_APPLICABLE` results. A non-match does not grant access: current RBAC middleware remains authoritative.
+- Added Super Admin-only policy CRUD and a simulation endpoint at `/api/abac-policies`; simulation does not mutate active policies or grant access.
+- Added deterministic ABAC unit tests and included them in the backend `npm test` sequence.
+- Added a deny-overrides ABAC middleware to user-management routes (read, create, update, delete, status change, and invitation resend). RBAC remains the prerequisite; ABAC can add a deny but cannot grant access by itself.
+- Extended ABAC to authenticated self-service device list and revoke routes using `devices:read` and `devices:revoke`. Device revoke resource ownership is resolved from MongoDB using both target ID and authenticated user ID; caller-supplied owner identifiers are not trusted.
+- ABAC middleware awaits asynchronous resource resolvers so resource attributes can be populated from authoritative server-side records.
+- Tests cover device-list and revoke action context, deny enforcement, resolver/evaluator/policy-store failures, invalid IDs, foreign/missing devices, idempotent revocation, successful revocation, and save failure.
+- **Not yet delivered:** policy publish/draft workflow, immutable historical snapshots, approval, broader route coverage, and scenario UI. Do not describe ABAC as universally enforced across every API.
+
+## Current security behaviour (source-verified)
 
 | Area | Current behaviour | Engineering note |
 |---|---|---|
