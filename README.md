@@ -115,6 +115,46 @@ The application records security-relevant activities, including:
 
 Sensitive credentials and authentication tokens must never be stored in audit event details.
 
+### 3.8 Attribute-Based Access Control (ABAC)
+
+SecureGate now includes an ABAC policy foundation alongside RBAC. RBAC remains the prerequisite authorization gate; ABAC adds contextual deny rules and cannot independently grant access.
+
+- Policies define an effect (PERMIT or DENY), action patterns, resource types, conditions, priority and enabled state.
+- Supported attributes are allowlisted across subject, device, resource and request context. Unsupported or missing attributes do not satisfy a condition.
+- A matching DENY overrides a matching PERMIT.
+- A policy non-match returns NOT_APPLICABLE; it does not bypass existing RBAC.
+- User-management routes apply ABAC deny checks after their existing RBAC checks.
+- Policy administration and simulation are restricted to the active Super Admin.
+
+**Policy API (all routes require an authenticated Super Admin):**
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| GET | `/api/abac-policies` | List policies and supported attributes |
+| POST | `/api/abac-policies` | Create a policy |
+| PUT | `/api/abac-policies/:id` | Update a policy (increments version) |
+| DELETE | `/api/abac-policies/:id` | Delete a policy |
+| POST | `/api/abac-policies/simulate` | Evaluate a scenario without changing policy state |
+
+Example policy body:
+
+```json
+{
+  "name": "Block low-trust device user changes",
+  "description": "Require a stronger device trust score for user updates.",
+  "effect": "DENY",
+  "actions": ["users:update"],
+  "resourceTypes": ["User"],
+  "conditions": [
+    { "attribute": "device.trustScore", "operator": "lt", "value": 60 }
+  ],
+  "priority": 100,
+  "enabled": true
+}
+```
+
+The policy engine currently supports `eq`, `neq`, `in`, `not_in`, `contains`, `gt`, `gte`, `lt` and `lte`. The current version counter increments on update; immutable policy history, draft/publish approvals, UI administration and broader route coverage remain future work.
+
 ### 3.7 Administrative Dashboard
 The dashboard is intended to display database-driven information:
 
@@ -308,3 +348,40 @@ Each build generates fresh random MongoDB and JWT secrets in temporary, permissi
 The pipeline creates a unique MongoDB volume for each build by using a temporary Compose override. Cleanup removes only that build's disposable test volume; it does not touch the persistent volume used by the regular local SecureGate Docker stack. Temporary environment files are removed after the build.
 
 Jenkins uses a separate, TLS-protected Docker-in-Docker engine. Its web interface is bound to 127.0.0.1:8081; the Docker daemon is not published to the Windows host. The DinD service inherits Docker Desktop's DNS forwarding rather than hard-coding public DNS servers, which may be unreachable from nested containers on some networks. The pipeline creates a dedicated BuildKit builder using the DinD host network and grants the `network.host` build entitlement only to image-build steps. It first stores the DinD TLS endpoint in a named Docker context so Buildx can create its builder with the mounted client certificates, then checks Docker Hub and npm registry connectivity before their respective image pulls and dependency installs. Jenkins data is retained in dedicated Docker volumes.
+
+
+### ABAC enforcement scope
+
+ABAC is an additional deny-only policy gate after authentication and the existing RBAC/role checks. A matching DENY blocks a request; a PERMIT or no matching policy does not grant permissions that RBAC has not already granted.
+
+Current route coverage includes user-management endpoints and authenticated self-service device endpoints:
+- Device list: `devices:read` on resource type `Device`.
+- Device revocation: `devices:revoke` on resource type `Device`.
+
+Device revocation resolves the target device from MongoDB using both the requested device ID and the authenticated user's ID before supplying resource ownership attributes to ABAC. Invalid, foreign, or nonexistent IDs are not treated as owned resources; the controller retains its validation and not-found responses. ABAC resource resolvers may be asynchronous so resource attributes can come from authoritative server-side records.
+
+This remains partial route coverage, not universal API enforcement. Policy evaluation errors fail closed with HTTP 503. The simulator accepts hypothetical inputs and is not an authorization bypass.
+
+
+## Risk assessment and security operations
+
+The login risk engine classifies normalized scores using the ZeroGate Campus SRS bands:
+
+| Score | Band | Recommended action |
+|---:|---|---|
+| 0–30 | Low | Allow subject to policy |
+| 31–60 | Medium | Require MFA |
+| 61–80 | High | Deny or administrator/security review |
+| 81–100 | Critical | Deny and create incident alert |
+
+Risk assessments are persisted in the `riskEvents` collection. High and Critical outcomes create open security alerts; Critical outcomes also create a linked open incident. Risk evidence is persisted before an access token is issued. If persistence fails, login does not issue a token.
+
+Security operations API (authenticated):
+- `GET /api/security/alerts` — list alerts; supports optional `status` and `severity` filters.
+- `PATCH /api/security/alerts/:id` — update alert status to `Open`, `Acknowledged` or `Resolved`.
+- `GET /api/security/incidents` — list incidents.
+- `PATCH /api/security/incidents/:id` — update incident status to `Open`, `Investigating`, `Contained` or `Resolved`, with optional resolution notes.
+
+Current implementation role gate: Super Admin, IT Administrator and Security Auditor may read; Super Admin and IT Administrator may update. The SRS Security Officer role is not yet part of the current bootstrap role set, so this is an interim role mapping, not final SRS conformance.
+
+**Important:** the Medium-band `REQUIRE_MFA` recommendation is recorded but a separate risk-triggered TOTP/step-up challenge is not yet implemented. The current login flow has already completed email OTP before the risk assessment. Risk scores are heuristic indicators, not proof of malicious activity.

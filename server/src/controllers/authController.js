@@ -8,6 +8,7 @@ import Invitation from '../models/Invitation.js';
 import { sendLoginOtpEmail } from '../services/emailService.js';
 import Device from '../models/Device.js';
 import { assessLoginRisk } from '../services/riskEngine.js';
+import { recordRiskAssessment } from '../services/riskAssessmentService.js';
 import { synchronizeAdminSeats, hasAdminSeat } from '../services/adminSeatService.js';
 
 
@@ -722,6 +723,10 @@ export const verifyLoginOtp = async (req, res) => {
       },
       { new: true, upsert: true, setDefaultsOnInsert: true }
     );
+
+    // Persist the risk decision and escalation before issuing any access token.
+    // If persistence fails, the outer handler returns an error and no session is issued.
+    await recordRiskAssessment({ user, device, risk, ipAddress, userAgent, assessedAt: now });
 
     await logAudit({
       req,

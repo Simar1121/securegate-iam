@@ -9,7 +9,7 @@ const deviceSchema = new mongoose.Schema({
   status: { type: String, enum: ['Trusted', 'Revoked', 'Blocked'], default: 'Trusted', index: true },
   trustScore: { type: Number, min: 0, max: 100, default: 100 },
   lastRiskScore: { type: Number, min: 0, max: 100, default: 0 },
-  lastRiskLevel: { type: String, enum: ['Low', 'Medium', 'High'], default: 'Low' },
+  lastRiskLevel: { type: String, enum: ['Low', 'Medium', 'High', 'Critical'], default: 'Low' },
   firstSeenAt: { type: Date, default: Date.now },
   lastSeenAt: { type: Date, default: Date.now },
   lastLoginAt: { type: Date, default: Date.now },

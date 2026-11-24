@@ -15,6 +15,8 @@ import auditRoutes from './routes/auditRoutes.js';
 import dashboardRoutes from './routes/dashboardRoutes.js';
 import setupRoutes from './routes/setupRoutes.js';
 import deviceRoutes from './routes/deviceRoutes.js';
+import abacPolicyRoutes from './routes/abacPolicyRoutes.js';
+import securityOperationsRoutes from './routes/securityOperationsRoutes.js';
 
 // Load environment variables
 dotenv.config();
@@ -132,6 +134,8 @@ app.use('/api/permissions', permissionRoutes);
 app.use('/api/audit-logs', auditRoutes);
 app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/devices', deviceRoutes);
+app.use('/api/abac-policies', abacPolicyRoutes);
+app.use('/api/security', securityOperationsRoutes);
 
 // 404 Handler for undefined routes
 app.use((req, res, next) => {

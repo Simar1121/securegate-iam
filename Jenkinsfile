@@ -164,13 +164,127 @@ EOF
 
         stage('Check Docker Hub registry connectivity') {
             steps {
-                sh '''docker run --rm --network host node:22-bookworm-slim node -e "require('dns').lookup('registry-1.docker.io', (err, address) => { if (err) { console.error('Docker Hub DNS failed:', err.code); process.exit(1); return; } console.log('Docker Hub DNS OK:', address); fetch('https://registry-1.docker.io/v2/').then(r => { console.log('Docker Hub registry HTTP:', r.status); process.exit(r.status === 401 || r.ok ? 0 : 1); }).catch(err => { console.error('Docker Hub HTTPS failed:', err.cause || err); process.exit(1); }); });"'''
+                sh '''
+                    docker run --rm --interactive --network host node:22-bookworm-slim node <<'NODE'
+                    const dns = require('node:dns');
+                    const https = require('node:https');
+                    const host = 'registry-1.docker.io';
+                    const attempts = 3;
+                    const maxAddresses = 4;
+                    const dnsDeadlineMs = 5000;
+                    const httpsAttemptDeadlineMs = 5000;
+
+                    const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+                    function resolveIpv4() {
+                      const resolver = new dns.Resolver({ timeout: dnsDeadlineMs, tries: 1 });
+                      return new Promise((resolve, reject) => {
+                        const deadline = setTimeout(() => {
+                          reject(Object.assign(new Error(`DNS resolution exceeded ${dnsDeadlineMs}ms`), { code: 'ETIMEDOUT' }));
+                          resolver.cancel();
+                        }, dnsDeadlineMs);
+
+                        resolver.resolve4(host, (error, addresses) => {
+                          clearTimeout(deadline);
+                          if (error) reject(error);
+                          else resolve(addresses);
+                        });
+                      });
+                    }
+
+                    function requestAddress(address) {
+                      return new Promise((resolve, reject) => {
+                        let settled = false;
+                        let deadline;
+                        const finish = (error, status) => {
+                          if (settled) return;
+                          settled = true;
+                          clearTimeout(deadline);
+                          if (error) reject(error);
+                          else resolve(status);
+                        };
+
+                        const request = https.request({
+                          hostname: host,
+                          servername: host,
+                          path: '/v2/',
+                          family: 4,
+                          rejectUnauthorized: true,
+                          lookup: (_hostname, _options, callback) => callback(null, address, 4),
+                        }, (response) => {
+                          response.once('error', (error) => finish(error));
+                          response.once('aborted', () => finish(Object.assign(new Error('response aborted before completion'), { code: 'ECONNRESET' })));
+                          response.once('close', () => {
+                            if (!response.complete) {
+                              finish(Object.assign(new Error('response closed before completion'), { code: 'ECONNRESET' }));
+                            }
+                          });
+                          response.once('end', () => {
+                            if (response.complete) finish(null, response.statusCode);
+                            else finish(Object.assign(new Error('response ended before completion'), { code: 'ECONNRESET' }));
+                          });
+                          response.resume();
+                        });
+
+                        request.once('error', (error) => finish(error));
+                        deadline = setTimeout(() => {
+                          request.destroy(Object.assign(new Error(`HTTPS attempt exceeded ${httpsAttemptDeadlineMs}ms`), { code: 'ETIMEDOUT' }));
+                        }, httpsAttemptDeadlineMs);
+                        request.end();
+                      });
+                    }
+
+                    async function checkRegistry() {
+                      let lastFailure = 'no IPv4 addresses resolved';
+
+                      for (let attempt = 1; attempt <= attempts; attempt += 1) {
+                        let addresses;
+                        try {
+                          addresses = await resolveIpv4();
+                          if (addresses.length === 0) throw Object.assign(new Error('no IPv4 addresses returned'), { code: 'ENODATA' });
+                          console.log(`Docker Hub DNS OK: ${addresses.length} IPv4 address(es)`);
+                        } catch (error) {
+                          lastFailure = `DNS ${error.code || error.name}: ${error.message}`;
+                          console.error(`Docker Hub DNS attempt ${attempt}/${attempts} failed: ${lastFailure}`);
+                          if (attempt < attempts) await delay(attempt * 1000);
+                          continue;
+                        }
+
+                        const candidates = addresses.slice(0, maxAddresses);
+                        for (let index = 0; index < candidates.length; index += 1) {
+                          try {
+                            const status = await requestAddress(candidates[index]);
+                            if (status === 401 || (status >= 200 && status < 300)) {
+                              console.log(`Docker Hub HTTPS OK (HTTP ${status}; 401 is expected without registry credentials)`);
+                              return;
+                            }
+                            lastFailure = `HTTP ${status}`;
+                            console.error(`Docker Hub IPv4 HTTPS candidate ${index + 1}/${candidates.length} returned ${lastFailure}`);
+                          } catch (error) {
+                            lastFailure = `${error.code || error.name}: ${error.message}`;
+                            console.error(`Docker Hub IPv4 HTTPS candidate ${index + 1}/${candidates.length} failed: ${lastFailure}`);
+                          }
+                        }
+
+                        if (attempt < attempts) await delay(attempt * 1000);
+                      }
+
+                      console.error(`Docker Hub HTTPS preflight failed after ${attempts} attempts: ${lastFailure}`);
+                      process.exitCode = 1;
+                    }
+
+                    checkRegistry().catch((error) => {
+                      console.error(`Docker Hub HTTPS preflight failed: ${error.code || error.name}: ${error.message}`);
+                      process.exitCode = 1;
+                    });
+NODE
+                '''
             }
         }
 
         stage('Check npm registry connectivity') {
             steps {
-                sh '''docker run --rm --network host node:22-bookworm-slim node -e "fetch('https://registry.npmjs.org/npm').then(r => { console.log('npm registry HTTP ' + r.status); process.exit(r.ok ? 0 : 1); }).catch(err => { console.error('Cannot reach npm registry:', err.cause || err); process.exit(1); });"'''
+                sh '''docker run --rm --network host node:22-bookworm-slim node -e "fetch('https://registry.npmjs.org/npm', { signal: AbortSignal.timeout(15000) }).then(r => { console.log('npm registry HTTP ' + r.status); process.exit(r.ok ? 0 : 1); }).catch(err => { const cause = err.cause || err; console.error('npm registry HTTPS failed:', cause.code || cause.name, cause.message); process.exit(1); });"'''
             }
         }
 
