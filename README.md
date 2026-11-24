@@ -361,3 +361,27 @@ Current route coverage includes user-management endpoints and authenticated self
 Device revocation resolves the target device from MongoDB using both the requested device ID and the authenticated user's ID before supplying resource ownership attributes to ABAC. Invalid, foreign, or nonexistent IDs are not treated as owned resources; the controller retains its validation and not-found responses. ABAC resource resolvers may be asynchronous so resource attributes can come from authoritative server-side records.
 
 This remains partial route coverage, not universal API enforcement. Policy evaluation errors fail closed with HTTP 503. The simulator accepts hypothetical inputs and is not an authorization bypass.
+
+
+## Risk assessment and security operations
+
+The login risk engine classifies normalized scores using the ZeroGate Campus SRS bands:
+
+| Score | Band | Recommended action |
+|---:|---|---|
+| 0–30 | Low | Allow subject to policy |
+| 31–60 | Medium | Require MFA |
+| 61–80 | High | Deny or administrator/security review |
+| 81–100 | Critical | Deny and create incident alert |
+
+Risk assessments are persisted in the `riskEvents` collection. High and Critical outcomes create open security alerts; Critical outcomes also create a linked open incident. Risk evidence is persisted before an access token is issued. If persistence fails, login does not issue a token.
+
+Security operations API (authenticated):
+- `GET /api/security/alerts` — list alerts; supports optional `status` and `severity` filters.
+- `PATCH /api/security/alerts/:id` — update alert status to `Open`, `Acknowledged` or `Resolved`.
+- `GET /api/security/incidents` — list incidents.
+- `PATCH /api/security/incidents/:id` — update incident status to `Open`, `Investigating`, `Contained` or `Resolved`, with optional resolution notes.
+
+Current implementation role gate: Super Admin, IT Administrator and Security Auditor may read; Super Admin and IT Administrator may update. The SRS Security Officer role is not yet part of the current bootstrap role set, so this is an interim role mapping, not final SRS conformance.
+
+**Important:** the Medium-band `REQUIRE_MFA` recommendation is recorded but a separate risk-triggered TOTP/step-up challenge is not yet implemented. The current login flow has already completed email OTP before the risk assessment. Risk scores are heuristic indicators, not proof of malicious activity.
