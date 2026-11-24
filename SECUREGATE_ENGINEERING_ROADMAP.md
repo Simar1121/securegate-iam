@@ -86,3 +86,11 @@ A hash chain alone does not protect against an attacker who can rewrite the enti
 - Keep local host MongoDB and Docker MongoDB isolated.
 - Preserve Jenkins home, certificate and Docker data volumes until backed up and inspected.
 - Do not merge the hardening branch into `develop` until required checks pass and a human reviews the diff.
+
+## Academic baseline reconciliation — 24 November 2026
+
+- Added [`ZERO_GATE_REQUIREMENTS_TRACEABILITY.md`](./ZERO_GATE_REQUIREMENTS_TRACEABILITY.md), an initial source-backed gap register for the submitted B.Tech Capstone II ZeroGate Campus SRS/SDD.
+- Static source review confirms material differences: five bootstrap roles vs seven SRS roles; three risk levels vs four SRS bands/actions; seven-day default bearer JWT vs short-lived access + rotating refresh-cookie target; Trusted/Revoked/Blocked device states vs Unverified/Trusted/At Risk/Blocked target; no hash-chain fields/verifier in inspected audit model/service.
+- Existing email OTP, token-version/revocation checks, device binding, RBAC and selective deny-only ABAC are real capabilities, but they do not by themselves satisfy TOTP, rotating refresh tokens, universal ABAC or the complete campus target.
+- The traceability document marks items Partial/Missing/Not Verified where evidence is incomplete. It is an initial static review, not a full runtime audit.
+- Do not change role mappings, risk thresholds, session lifetime/schema or audit failure semantics until the submitted SRS/SDD baseline and migration approach are confirmed by the team/faculty.
