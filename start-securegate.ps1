@@ -1,61 +1,111 @@
-# Start SecureGate from the existing Kubernetes deployment and open the browser.
-# Run from the repository root in PowerShell: .\start-securegate.ps1
+# Start the existing SecureGate Kubernetes stack after a Windows restart.
+# Run from the repository root: .\start-securegate.ps1
+# This script does NOT build images, reset databases, or delete Kubernetes resources.
 
 $ErrorActionPreference = 'Stop'
 $Namespace = 'securegate'
-$Service = 'frontend'
 $LocalPort = 8082
 $RemotePort = 80
 $Url = "http://localhost:$LocalPort"
+$HealthUrl = "$Url/api/health"
+$DockerDesktopExe = Join-Path $env:ProgramFiles 'Docker\Docker\Docker Desktop.exe'
 
-Write-Host "SecureGate launcher" -ForegroundColor Cyan
+Write-Host '=== SecureGate startup ===' -ForegroundColor Cyan
 
-if (-not (Get-Command kubectl -ErrorAction SilentlyContinue)) {
-  throw "kubectl was not found. Install Docker Desktop Kubernetes or add kubectl to PATH."
+if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+  throw "Docker CLI was not found in PATH. Repair/reinstall Docker Desktop before continuing."
 }
 
-$context = kubectl config current-context 2>$null
-if ($LASTEXITCODE -ne 0 -or $context -ne 'docker-desktop') {
-  throw "Expected Kubernetes context 'docker-desktop'. Current context: $context. Switch context before continuing."
+# 1. Start Docker Desktop if its engine is not already available.
+$dockerReady = $false
+try {
+  docker info *> $null
+  $dockerReady = ($LASTEXITCODE -eq 0)
+} catch {}
+
+if (-not $dockerReady) {
+  if (-not (Test-Path $DockerDesktopExe)) {
+    throw "Docker Desktop was not found at '$DockerDesktopExe'. Open Docker Desktop manually and rerun this script."
+  }
+  Write-Host "Starting Docker Desktop..." -ForegroundColor Yellow
+  Start-Process -FilePath $DockerDesktopExe
+  for ($i = 0; $i -lt 180; $i++) {
+    Start-Sleep -Seconds 2
+    docker info *> $null
+    if ($LASTEXITCODE -eq 0) { $dockerReady = $true; break }
+  }
+}
+if (-not $dockerReady) {
+  throw "Docker Desktop did not become ready within 6 minutes. Check Docker Desktop, then rerun this script."
+}
+Write-Host "Docker Desktop is ready." -ForegroundColor Green
+
+# 2. Select the existing Docker Desktop Kubernetes context.
+$contexts = kubectl config get-contexts -o name 2>$null
+if ($LASTEXITCODE -ne 0 -or $contexts -notcontains 'docker-desktop') {
+  throw "The 'docker-desktop' Kubernetes context is missing. Enable Kubernetes in Docker Desktop."
+}
+$currentContext = kubectl config current-context 2>$null
+if ($currentContext -ne 'docker-desktop') {
+  Write-Host "Switching kubectl context to docker-desktop..." -ForegroundColor Yellow
+  kubectl config use-context docker-desktop
+  if ($LASTEXITCODE -ne 0) { throw "Could not select docker-desktop Kubernetes context." }
 }
 
-$frontend = kubectl get deployment frontend -n $Namespace -o jsonpath='{.status.readyReplicas}' 2>$null
-$backend = kubectl get deployment backend -n $Namespace -o jsonpath='{.status.readyReplicas}' 2>$null
-if ($LASTEXITCODE -ne 0 -or [int]$frontend -lt 1 -or [int]$backend -lt 1) {
-  throw "SecureGate frontend/backend are not ready in namespace '$Namespace'. Check: kubectl get pods -n $Namespace"
+# 3. Wait for Kubernetes to start, then wait for the existing database and app.
+Write-Host "Waiting for Docker Desktop Kubernetes..." -ForegroundColor Yellow
+$clusterReady = $false
+for ($i = 0; $i -lt 90; $i++) {
+  kubectl get nodes *> $null
+  if ($LASTEXITCODE -eq 0) { $clusterReady = $true; break }
+  Start-Sleep -Seconds 2
 }
+if (-not $clusterReady) {
+  throw "Kubernetes did not become ready within 3 minutes. Check Docker Desktop > Kubernetes."
+}
+kubectl wait --for=condition=Ready nodes --all --timeout=180s
+if ($LASTEXITCODE -ne 0) { throw "The Kubernetes node is not Ready. Rerun after Docker Desktop finishes starting." }
 
+foreach ($deployment in @('mongodb-83', 'backend', 'frontend')) {
+  Write-Host "Waiting for deployment/$deployment..." -ForegroundColor Yellow
+  kubectl rollout status "deployment/$deployment" -n $Namespace --timeout=240s
+  if ($LASTEXITCODE -ne 0) {
+    kubectl get pods -n $Namespace -o wide
+    throw "deployment/$deployment is not ready. No database or Kubernetes resources were deleted."
+  }
+}
+Write-Host "SecureGate frontend, backend, and MongoDB are ready." -ForegroundColor Green
+
+# 4. Reuse a healthy port-forward or create one in a separate PowerShell window.
 $listener = Get-NetTCPConnection -LocalPort $LocalPort -State Listen -ErrorAction SilentlyContinue
 if ($listener) {
   try {
-    $response = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 3
-    if ($response.StatusCode -eq 200) {
-      Write-Host "SecureGate is already available at $Url" -ForegroundColor Green
+    $health = Invoke-WebRequest -Uri $HealthUrl -UseBasicParsing -TimeoutSec 4
+    if ($health.StatusCode -eq 200) {
+      Write-Host "Existing SecureGate port-forward is healthy." -ForegroundColor Green
       Start-Process $Url
       exit 0
     }
   } catch {}
-  throw "Port $LocalPort is already in use by another process. Close that process or change LocalPort in this script."
+  throw "Port $LocalPort is occupied but SecureGate health check failed. Close the stale port-forward window and rerun."
 }
 
-$command = 'kubectl port-forward service/{0} {1}:{2} -n {3}' -f $Service, $LocalPort, $RemotePort, $Namespace
-$process = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoExit','-Command', $command) -PassThru
-Write-Host "Starting frontend port-forward (PID $($process.Id))..." -ForegroundColor Yellow
+$portForwardCommand = 'kubectl port-forward service/frontend {0}:{1} -n {2}' -f $LocalPort, $RemotePort, $Namespace
+$portForward = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoExit', '-Command', $portForwardCommand) -PassThru
+Write-Host "Starting frontend port-forward (PID $($portForward.Id))..." -ForegroundColor Yellow
 
-$ready = $false
-for ($i = 0; $i -lt 25; $i++) {
-  Start-Sleep -Milliseconds 400
+$apiReady = $false
+for ($i = 0; $i -lt 40; $i++) {
+  Start-Sleep -Milliseconds 500
   try {
-    $response = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 2
-    if ($response.StatusCode -eq 200) { $ready = $true; break }
+    $health = Invoke-WebRequest -Uri $HealthUrl -UseBasicParsing -TimeoutSec 2
+    if ($health.StatusCode -eq 200) { $apiReady = $true; break }
   } catch {}
 }
-
-if (-not $ready) {
-  Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
-  throw "SecureGate did not respond at $Url. Check the port-forward terminal and Kubernetes frontend service."
+if (-not $apiReady) {
+  throw "Port-forward started but API health check failed. Inspect its PowerShell window. Do not reset MongoDB."
 }
 
-Write-Host "SecureGate is ready: $Url" -ForegroundColor Green
+Write-Host "SecureGate is READY: $Url" -ForegroundColor Green
 Start-Process $Url
 Write-Host "Keep the port-forward PowerShell window open while using SecureGate." -ForegroundColor Gray
